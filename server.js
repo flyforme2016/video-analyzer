@@ -1,0 +1,410 @@
+'use strict';
+
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
+const net = require('net');
+const https = require('https');
+const { execFile } = require('child_process');
+const http = require('http');
+const { URL } = require('url');
+
+const express = require('express');
+const cors = require('cors');
+const multer = require('multer');
+
+const { analyzeIntegrity } = require('./lib/integrity');
+
+const DEFAULT_PORT = 3000;
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT_FALLBACK_MAX = Number(process.env.PORT_FALLBACK_MAX) || 30;
+const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1GB
+const FFPROBE_TIMEOUT_MS = 60 * 1000;
+const FFPROBE_BIN = resolveFfprobe();
+const FFMPEG_BIN = resolveFfmpeg();
+
+/**
+ * 애플리케이션 엔트리 포인트. 사용 가능한 포트를 찾은 뒤 서버를 시작한다.
+ * @returns {Promise<void>}
+ */
+async function main() {
+  const port = await resolveListenPort();
+  startServer(createApp(), port);
+}
+
+/**
+ * Express 서버를 지정 호스트/포트에서 시작한다.
+ * @param {import('express').Express} app 구성된 Express 앱
+ * @param {number} port 바인딩할 포트
+ * @returns {void}
+ */
+function startServer(app, port) {
+  const server = app.listen(port, HOST);
+  server.on('listening', () => {
+    const localUrl = `http://localhost:${port}`;
+    // eslint-disable-next-line no-console
+    console.log(`video-analyzer running: ${localUrl} (bind ${HOST}:${port})`);
+    console.log(`ffprobe: ${FFPROBE_BIN}`);
+    console.log(`ffmpeg: ${FFMPEG_BIN}`);
+  });
+  server.on('error', (err) => {
+    console.error('서버 시작 실패:', err.message || err);
+    process.exit(1);
+  });
+}
+
+/**
+ * 바인딩할 포트를 결정한다. PORT 미지정 시 기본 포트부터 빈 포트를 탐색한다.
+ * @returns {Promise<number>} 사용 가능한 포트 번호
+ * @throws {Error} 사용 가능한 포트를 찾지 못한 경우
+ */
+async function resolveListenPort() {
+  const explicit = process.env.PORT !== undefined && String(process.env.PORT).trim() !== '';
+  const start = explicit ? Number(process.env.PORT) : DEFAULT_PORT;
+  const maxAttempts = explicit ? 1 : PORT_FALLBACK_MAX;
+  try {
+    const port = await findAvailablePort(HOST, start, maxAttempts);
+    if (!explicit && port !== start) {
+      console.warn(
+        `포트 ${start} 사용 불가 (WSL에서는 Windows가 점유해도 lsof/ss에 안 보일 수 있음) → ${port} 사용`
+      );
+    }
+    return port;
+  } catch (err) {
+    printPortConflictHelp(start, explicit);
+    throw err;
+  }
+}
+
+/**
+ * host에서 start부터 순차적으로 bind 가능한 포트를 찾는다.
+ * @param {string} host 바인딩 호스트
+ * @param {number} startPort 시작 포트
+ * @param {number} maxAttempts 최대 시도 횟수
+ * @returns {Promise<number>} 사용 가능한 포트
+ * @throws {Error} maxAttempts 내에 빈 포트가 없을 때
+ */
+function findAvailablePort(host, startPort, maxAttempts) {
+  return new Promise((resolve, reject) => {
+    /**
+     * 단일 포트에 bind 테스트를 수행한다.
+     * @param {number} port 시도할 포트
+     * @param {number} left 남은 시도 횟수
+     * @returns {void}
+     */
+    function tryPort(port, left) {
+      if (left <= 0) {
+        reject(new Error(`포트 ${startPort}~${port - 1} 모두 사용 중`));
+        return;
+      }
+      const tester = net.createServer();
+      tester.once('error', (err) => {
+        if (err.code === 'EADDRINUSE') tryPort(port + 1, left - 1);
+        else reject(err);
+      });
+      tester.once('listening', () => {
+        tester.close(() => resolve(port));
+      });
+      tester.listen(port, host);
+    }
+    tryPort(startPort, maxAttempts);
+  });
+}
+
+/**
+ * 포트 충돌 시 WSL/Windows 환경별 확인 방법을 출력한다.
+ * @param {number} port 충돌이 난 포트
+ * @param {boolean} explicit PORT 환경변수로 고정했는지 여부
+ * @returns {void}
+ */
+function printPortConflictHelp(port, explicit) {
+  console.error(`포트 ${port} (${HOST})을(를) 사용할 수 없습니다.`);
+  if (explicit) {
+    console.error('다른 포트 지정: PORT=3001 npm start');
+  }
+  console.error('WSL: ss -tlnp | grep :' + port);
+  console.error('Windows PowerShell: netstat -ano | findstr :' + port);
+  console.error('(WSL mirrored 모드에서는 Windows 점유가 Linux lsof에 안 보일 수 있음)');
+}
+
+/**
+ * 사용할 ffprobe 실행 파일 경로를 결정한다.
+ * 환경변수(FFPROBE_PATH) → 알려진 설치 경로 → PATH의 'ffprobe' 순으로 탐색한다.
+ * @returns {string} ffprobe 실행 파일 경로 또는 명령어 이름
+ */
+function resolveFfprobe() {
+  return resolveTool('FFPROBE_PATH', 'ffprobe');
+}
+
+/**
+ * 사용할 ffmpeg 실행 파일 경로를 결정한다.
+ * @returns {string} ffmpeg 실행 파일 경로
+ */
+function resolveFfmpeg() {
+  return resolveTool('FFMPEG_PATH', 'ffmpeg');
+}
+
+/**
+ * ffprobe/ffmpeg 실행 파일 경로를 후보 목록에서 찾는다.
+ * @param {string} envKey 환경변수 키
+ * @param {string} fallback 기본 명령어 이름
+ * @returns {string} 실행 파일 경로
+ */
+function resolveTool(envKey, fallback) {
+  const base = process.env[envKey];
+  const dir = '/usr/local/m2/core/node_modules/_m2/ffmpeg';
+  const candidates = [
+    base,
+    path.join(dir, fallback),
+    `/usr/local/bin/${fallback}`,
+    `/usr/bin/${fallback}`,
+    `/root/bin/${fallback}`,
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch (e) { /* ignore */ }
+  }
+  return fallback;
+}
+
+/**
+ * 라우트와 미들웨어가 모두 등록된 Express 애플리케이션을 생성한다.
+ * @returns {import('express').Express} 구성된 Express 앱 인스턴스
+ */
+function createApp() {
+  const app = express();
+  const upload = createUploader();
+
+  app.use(cors());
+  app.use(express.json({ limit: '2mb' }));
+  app.use(express.static(path.join(__dirname, 'public')));
+
+  app.post('/api/probe/file', upload.single('video'), handleProbeFile);
+  app.post('/api/probe/url', handleProbeUrl);
+  app.get('/api/proxy', handleProxy);
+  app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+  app.use(handleError);
+  return app;
+}
+
+/**
+ * 업로드된 비디오 파일을 임시 저장한 뒤 ffprobe로 분석한다.
+ * @param {import('express').Request} req 업로드 파일(req.file)을 포함한 요청
+ * @param {import('express').Response} res ffprobe 결과 JSON을 반환할 응답
+ * @returns {Promise<void>}
+ */
+async function handleProbeFile(req, res) {
+  if (!req.file) {
+    res.status(400).json({ error: '업로드된 파일이 없습니다. (필드명: video)' });
+    return;
+  }
+  const filePath = req.file.path;
+  try {
+    const [probeResult, integrityResult] = await Promise.allSettled([
+      runFfprobe(filePath),
+      analyzeIntegrity(filePath, FFPROBE_BIN, FFMPEG_BIN),
+    ]);
+    if (probeResult.status === 'rejected') throw probeResult.reason;
+    res.json({
+      source: { type: 'file', name: req.file.originalname, size: req.file.size },
+      ffprobe: probeResult.value,
+      integrity: integrityResult.status === 'fulfilled' ? integrityResult.value : { error: String(integrityResult.reason) },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'ffprobe 실행 실패', detail: String(err.message || err) });
+  } finally {
+    safeUnlink(filePath);
+  }
+}
+
+/**
+ * 원격 URL의 비디오를 ffprobe로 직접 분석한다.
+ * @param {import('express').Request} req body.url에 분석 대상 URL을 포함한 요청
+ * @param {import('express').Response} res ffprobe 결과 JSON을 반환할 응답
+ * @returns {Promise<void>}
+ */
+async function handleProbeUrl(req, res) {
+  const target = req.body && req.body.url;
+  if (!isValidHttpUrl(target)) {
+    res.status(400).json({ error: '유효한 http(s) URL이 필요합니다.' });
+    return;
+  }
+  try {
+    const [probeResult, integrityResult] = await Promise.allSettled([
+      runFfprobe(target),
+      analyzeIntegrity(target, FFPROBE_BIN, FFMPEG_BIN),
+    ]);
+    if (probeResult.status === 'rejected') throw probeResult.reason;
+    res.json({
+      source: { type: 'url', url: target },
+      ffprobe: probeResult.value,
+      integrity: integrityResult.status === 'fulfilled' ? integrityResult.value : { error: String(integrityResult.reason) },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'ffprobe 실행 실패', detail: String(err.message || err) });
+  }
+}
+
+/**
+ * CORS/Range 제약을 우회하기 위해 원격 미디어를 스트리밍 프록시한다.
+ * 브라우저 측 박스 파싱과 <video> 재생에 사용된다.
+ * @param {import('express').Request} req query.url에 대상 URL을 포함한 요청 (Range 헤더 전달)
+ * @param {import('express').Response} res 원격 응답을 그대로 중계할 응답
+ * @returns {void}
+ */
+function handleProxy(req, res) {
+  const target = req.query.url;
+  if (!isValidHttpUrl(target)) {
+    res.status(400).json({ error: '유효한 http(s) URL이 필요합니다.' });
+    return;
+  }
+  forwardRemote(target, req.headers.range, res, 0);
+}
+
+/**
+ * 원격 URL 요청을 수행하고 응답을 클라이언트로 중계한다. 리다이렉트를 따라간다.
+ * @param {string} target 원격 미디어 URL
+ * @param {string|undefined} range 클라이언트가 보낸 Range 헤더(없으면 undefined)
+ * @param {import('express').Response} res 데이터를 중계할 Express 응답
+ * @param {number} depth 현재 리다이렉트 추적 깊이
+ * @returns {void}
+ */
+function forwardRemote(target, range, res, depth) {
+  if (depth > 5) {
+    res.status(508).json({ error: '리다이렉트가 너무 많습니다.' });
+    return;
+  }
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch (e) {
+    res.status(400).json({ error: '잘못된 URL' });
+    return;
+  }
+  const client = parsed.protocol === 'https:' ? https : http;
+  const headers = {};
+  if (range) headers.Range = range;
+
+  const upstream = client.get(target, { headers }, (up) => {
+    const status = up.statusCode || 502;
+    if ([301, 302, 303, 307, 308].includes(status) && up.headers.location) {
+      const next = new URL(up.headers.location, target).toString();
+      up.resume();
+      forwardRemote(next, range, res, depth + 1);
+      return;
+    }
+    res.status(status);
+    copyHeader(up, res, 'content-type');
+    copyHeader(up, res, 'content-length');
+    copyHeader(up, res, 'content-range');
+    copyHeader(up, res, 'accept-ranges');
+    up.pipe(res);
+  });
+  upstream.on('error', (err) => {
+    if (!res.headersSent) res.status(502).json({ error: '원격 요청 실패', detail: String(err.message || err) });
+  });
+}
+
+/**
+ * ffprobe를 실행해 format/stream 정보를 JSON으로 반환한다.
+ * @param {string} input 로컬 파일 경로 또는 http(s) URL
+ * @returns {Promise<object>} ffprobe의 파싱된 JSON 결과
+ * @throws {Error} ffprobe 실행 실패 또는 JSON 파싱 실패 시
+ */
+function runFfprobe(input) {
+  const args = [
+    '-v', 'quiet',
+    '-hide_banner',
+    '-print_format', 'json',
+    '-show_format',
+    '-show_streams',
+    '-show_chapters',
+    '-show_programs',
+    input,
+  ];
+  return new Promise((resolve, reject) => {
+    execFile(FFPROBE_BIN, args, { timeout: FFPROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error((stderr && stderr.toString()) || err.message));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.toString() || '{}'));
+      } catch (e) {
+        reject(new Error('ffprobe JSON 파싱 실패: ' + e.message));
+      }
+    });
+  });
+}
+
+/**
+ * 임시 디렉터리에 업로드를 저장하는 multer 인스턴스를 생성한다.
+ * @returns {import('multer').Multer} 구성된 multer 업로더
+ */
+function createUploader() {
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) => cb(null, `va_${Date.now()}_${Math.random().toString(36).slice(2)}`),
+  });
+  return multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
+}
+
+/**
+ * 표현식이 유효한 http/https URL인지 검사한다.
+ * @param {unknown} value 검사할 값
+ * @returns {boolean} http(s) URL이면 true
+ */
+function isValidHttpUrl(value) {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * 업스트림 응답의 특정 헤더를 클라이언트 응답으로 복사한다.
+ * @param {import('http').IncomingMessage} from 업스트림 응답
+ * @param {import('express').Response} to 클라이언트 응답
+ * @param {string} name 복사할 헤더 이름(소문자)
+ * @returns {void}
+ */
+function copyHeader(from, to, name) {
+  const v = from.headers[name];
+  if (v !== undefined) to.setHeader(name, v);
+}
+
+/**
+ * 임시 파일을 조용히 삭제한다(실패해도 예외를 던지지 않음).
+ * @param {string} filePath 삭제할 파일 경로
+ * @returns {void}
+ */
+function safeUnlink(filePath) {
+  fs.unlink(filePath, () => {});
+}
+
+/**
+ * 처리되지 않은 라우트 오류를 JSON으로 응답하는 Express 에러 핸들러.
+ * @param {Error} err 발생한 오류
+ * @param {import('express').Request} req 요청
+ * @param {import('express').Response} res 응답
+ * @param {import('express').NextFunction} next 다음 미들웨어
+ * @returns {void}
+ */
+function handleError(err, req, res, next) {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const code = err && err.code === 'LIMIT_FILE_SIZE' ? 413 : 500;
+  res.status(code).json({ error: '서버 오류', detail: String((err && err.message) || err) });
+}
+
+main().catch((err) => {
+  console.error(err.message || err);
+  process.exit(1);
+});

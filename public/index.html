@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Analyzer — 바이트/박스 시각화 + ffprobe 트랜스코딩 검증</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="logo">▮▮</span>
+      <div>
+        <h1>Video Analyzer</h1>
+        <p class="subtitle">컨테이너 바이트·박스 시각화 · ffprobe 메타데이터 · 트랜스코딩 이상 점검</p>
+      </div>
+    </div>
+  </header>
+
+  <section class="source-bar">
+    <div id="dropzone" class="dropzone">
+      <div class="dz-inner">
+        <strong>여기로 비디오 파일을 드래그&amp;드롭</strong>
+        <span>또는</span>
+        <label class="btn">
+          파일 선택
+          <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.m4v,.m4a,.3gp,.gif,.webm" hidden />
+        </label>
+      </div>
+    </div>
+    <div class="url-box">
+      <input type="text" id="urlInput" placeholder="https://example.com/video.mp4 (URL로 불러오기)" />
+      <button class="btn primary" id="urlBtn">URL 불러오기</button>
+    </div>
+  </section>
+
+  <div id="status" class="status" hidden></div>
+
+  <main class="layout">
+    <section class="panel player-panel">
+      <div class="panel-head">
+        <div class="player-head">
+          <h2 id="playerTitle">재생</h2>
+          <span id="playerKindBadge" class="player-kind kind-video" hidden>VIDEO</span>
+        </div>
+        <span id="sourceLabel" class="muted">소스 없음</span>
+      </div>
+      <div class="player-stage" id="playerStage" data-kind="idle">
+        <video id="player" controls playsinline hidden></video>
+        <img id="imagePlayer" class="image-player" alt="" hidden />
+      </div>
+      <div id="quickMeta" class="quick-meta"></div>
+    </section>
+
+    <section class="panel tabs-panel">
+      <nav class="tabs">
+        <button class="tab active" data-tab="bytes">바이트 / 박스</button>
+        <button class="tab" data-tab="probe">ffprobe</button>
+        <button class="tab" data-tab="checks">트랜스코딩 점검</button>
+        <button class="tab" data-tab="integrity">미디어 무결성</button>
+      </nav>
+
+      <div class="tab-body">
+        <div class="tab-pane active" id="tab-bytes">
+          <div class="bytes-layout" id="bytesLayout">
+            <div class="box-tree" id="boxTreePane">
+              <div class="mini-head tree-head">
+                <span id="containerTreeLabel">컨테이너 트리</span>
+                <span class="tree-head-actions" id="treeHeadActions" hidden>
+                  <button type="button" class="btn tree-btn" id="treeExpandAll" title="모든 노드 펼치기">펼치기</button>
+                  <button type="button" class="btn tree-btn" id="treeCollapseAll" title="컨테이너 노드 접기">접기</button>
+                </span>
+              </div>
+              <ul id="boxTree" class="tree"></ul>
+              <div id="treeEmpty" class="empty">MP4/MOV 계열 파일을 불러오면 박스 구조가 표시됩니다.</div>
+            </div>
+            <div class="bytes-splitter" id="bytesSplitter" role="separator" aria-orientation="vertical" aria-label="박스 트리 너비 조절" tabindex="0"></div>
+            <div class="box-detail">
+              <div class="mini-head" id="detailTitle">박스 상세</div>
+              <div id="fieldList" class="field-list"></div>
+              <div class="mini-head">Hex 덤프</div>
+              <pre id="hexDump" class="hex-dump"></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-pane" id="tab-probe">
+          <div class="probe-toolbar">
+            <button class="btn" id="copyProbe">JSON 복사</button>
+            <span id="probeElapsed" class="muted"></span>
+          </div>
+          <div id="probeSummary" class="probe-summary"></div>
+          <pre id="probeJson" class="json-dump"></pre>
+        </div>
+
+        <div class="tab-pane" id="tab-checks">
+          <div id="checksScore" class="checks-score"></div>
+          <ul id="checksList" class="checks-list"></ul>
+        </div>
+
+        <div class="tab-pane" id="tab-integrity">
+          <div id="integrityScore" class="checks-score"></div>
+          <div id="integrityMeta" class="probe-summary"></div>
+          <ul id="integrityList" class="checks-list"></ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="mp4parser.js"></script>
+  <script src="gifparser.js"></script>
+  <script src="ebmlparser.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
