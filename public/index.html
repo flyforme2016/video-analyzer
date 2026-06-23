@@ -24,7 +24,7 @@
         <span>또는</span>
         <label class="btn">
           파일 선택
-          <input type="file" id="fileInput" accept="video/*,.mp4,.mov,.m4v,.m4a,.3gp,.gif,.webm" hidden />
+          <input type="file" id="fileInput" accept="video/*,image/gif,application/vnd.apple.mpegurl,.mp4,.mov,.m4v,.m4a,.3gp,.gif,.webm,.mkv,.avi,.flv,.f4v,.ts,.m2ts,.mts,.m3u8,.m3u" hidden />
         </label>
       </div>
     </div>
@@ -48,6 +48,7 @@
       <div class="player-stage" id="playerStage" data-kind="idle">
         <video id="player" controls playsinline hidden></video>
         <img id="imagePlayer" class="image-player" alt="" hidden />
+        <div id="playerNotice" class="player-notice" hidden></div>
       </div>
       <div id="quickMeta" class="quick-meta"></div>
     </section>
@@ -107,9 +108,15 @@
     </section>
   </main>
 
-  <script src="mp4parser.js"></script>
-  <script src="gifparser.js"></script>
-  <script src="ebmlparser.js"></script>
-  <script src="app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+  <script src="parsers/mp4parser.js"></script>
+  <script src="parsers/gifparser.js"></script>
+  <script src="parsers/ebmlparser.js"></script>
+  <script src="parsers/flvparser.js"></script>
+  <script src="parsers/hlsparser.js"></script>
+  <script src="parsers/tsparser.js"></script>
+  <script type="module" src="app/main.js"></script>
 </body>
 </html>

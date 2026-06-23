@@ -6,6 +6,7 @@ const fs = require('fs');
 const net = require('net');
 const https = require('https');
 const { execFile } = require('child_process');
+const { logCommand } = require('./lib/cmd-logger');
 const http = require('http');
 const { URL } = require('url');
 
@@ -19,7 +20,8 @@ const DEFAULT_PORT = 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT_FALLBACK_MAX = Number(process.env.PORT_FALLBACK_MAX) || 30;
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1GB
-const FFPROBE_TIMEOUT_MS = 60 * 1000;
+const FFPROBE_TIMEOUT_MS = Number(process.env.FFPROBE_TIMEOUT_MS) || 60 * 1000;
+const FFPROBE_HLS_TIMEOUT_MS = Number(process.env.FFPROBE_HLS_TIMEOUT_MS) || 4 * 60 * 1000;
 const FFPROBE_BIN = resolveFfprobe();
 const FFMPEG_BIN = resolveFfmpeg();
 
@@ -129,7 +131,7 @@ function printPortConflictHelp(port, explicit) {
 
 /**
  * 사용할 ffprobe 실행 파일 경로를 결정한다.
- * 환경변수(FFPROBE_PATH) → 알려진 설치 경로 → PATH의 'ffprobe' 순으로 탐색한다.
+ * 환경변수(FFPROBE_PATH) → 루트 번들(ffprobe_v1) → 시스템 경로 → PATH의 'ffprobe' 순으로 탐색한다.
  * @returns {string} ffprobe 실행 파일 경로 또는 명령어 이름
  */
 function resolveFfprobe() {
@@ -146,26 +148,43 @@ function resolveFfmpeg() {
 
 /**
  * ffprobe/ffmpeg 실행 파일 경로를 후보 목록에서 찾는다.
+ * 환경변수 → 저장소 루트 번들 바이너리(<tool>_v1) → 시스템 경로 → PATH 순으로 탐색한다.
+ * 개발·배포 모두 루트 번들 바이너리를 사용하며, 필요 시 FFMPEG_PATH/FFPROBE_PATH로 덮어쓸 수 있다.
  * @param {string} envKey 환경변수 키
  * @param {string} fallback 기본 명령어 이름
  * @returns {string} 실행 파일 경로
  */
 function resolveTool(envKey, fallback) {
   const base = process.env[envKey];
-  const dir = '/usr/local/m2/core/node_modules/_m2/ffmpeg';
   const candidates = [
     base,
-    path.join(dir, fallback),
+    path.join(__dirname, `${fallback}_v1`),
+    path.join(__dirname, 'vendor', fallback),
     `/usr/local/bin/${fallback}`,
     `/usr/bin/${fallback}`,
     `/root/bin/${fallback}`,
   ].filter(Boolean);
   for (const c of candidates) {
     try {
-      if (fs.existsSync(c)) return c;
+      if (!fs.existsSync(c)) continue;
+      ensureExecutable(c);
+      return c;
     } catch (e) { /* ignore */ }
   }
   return fallback;
+}
+
+/**
+ * 실행 권한이 없으면 0755로 부여한다(git 클론 시 +x 비트 유실 대비).
+ * @param {string} filePath 실행 파일 경로
+ * @returns {void}
+ */
+function ensureExecutable(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+  } catch (_) {
+    try { fs.chmodSync(filePath, 0o755); } catch (e) { /* 권한 변경 실패는 무시 */ }
+  }
 }
 
 /**
@@ -202,18 +221,10 @@ async function handleProbeFile(req, res) {
   }
   const filePath = req.file.path;
   try {
-    const [probeResult, integrityResult] = await Promise.allSettled([
-      runFfprobe(filePath),
-      analyzeIntegrity(filePath, FFPROBE_BIN, FFMPEG_BIN),
-    ]);
-    if (probeResult.status === 'rejected') throw probeResult.reason;
-    res.json({
-      source: { type: 'file', name: req.file.originalname, size: req.file.size },
-      ffprobe: probeResult.value,
-      integrity: integrityResult.status === 'fulfilled' ? integrityResult.value : { error: String(integrityResult.reason) },
-    });
+    await streamAnalysis(res, { type: 'file', name: req.file.originalname, size: req.file.size }, filePath);
   } catch (err) {
-    res.status(500).json({ error: 'ffprobe 실행 실패', detail: String(err.message || err) });
+    if (!res.headersSent) res.status(500).json({ error: '분석 실행 실패', detail: String(err.message || err) });
+    else res.end();
   } finally {
     safeUnlink(filePath);
   }
@@ -232,19 +243,46 @@ async function handleProbeUrl(req, res) {
     return;
   }
   try {
-    const [probeResult, integrityResult] = await Promise.allSettled([
-      runFfprobe(target),
-      analyzeIntegrity(target, FFPROBE_BIN, FFMPEG_BIN),
-    ]);
-    if (probeResult.status === 'rejected') throw probeResult.reason;
-    res.json({
-      source: { type: 'url', url: target },
-      ffprobe: probeResult.value,
-      integrity: integrityResult.status === 'fulfilled' ? integrityResult.value : { error: String(integrityResult.reason) },
-    });
+    await streamAnalysis(res, { type: 'url', url: target }, target);
   } catch (err) {
-    res.status(500).json({ error: 'ffprobe 실행 실패', detail: String(err.message || err) });
+    if (!res.headersSent) res.status(500).json({ error: '분석 실행 실패', detail: String(err.message || err) });
+    else res.end();
   }
+}
+
+/**
+ * ffprobe와 무결성 검사를 독립적으로 실행하고 완료되는 즉시 NDJSON 한 줄씩 흘려보낸다.
+ * 느린 무결성 검사가 빠른 ffprobe 결과 전달을 막지 않도록 분리한다.
+ * @param {import('express').Response} res Express 응답(스트리밍)
+ * @param {object} source 소스 메타데이터
+ * @param {string} input 로컬 경로 또는 http(s) URL
+ * @returns {Promise<void>}
+ */
+async function streamAnalysis(res, source, input) {
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  writeNdjson(res, { stage: 'source', source });
+
+  const probeJob = runFfprobe(input)
+    .then((ffprobe) => writeNdjson(res, { stage: 'probe', ffprobe, ffprobeError: null }))
+    .catch((e) => writeNdjson(res, { stage: 'probe', ffprobe: null, ffprobeError: String(e.message || e) }));
+  const integrityJob = analyzeIntegrity(input, FFPROBE_BIN, FFMPEG_BIN)
+    .then((integrity) => writeNdjson(res, { stage: 'integrity', integrity }))
+    .catch((e) => writeNdjson(res, { stage: 'integrity', integrity: { error: String(e.message || e) } }));
+
+  await Promise.allSettled([probeJob, integrityJob]);
+  res.end();
+}
+
+/**
+ * 객체를 NDJSON 한 줄로 직렬화해 전송한다(연결이 끝났으면 무시).
+ * @param {import('express').Response} res Express 응답
+ * @param {object} obj 전송할 객체
+ * @returns {void}
+ */
+function writeNdjson(res, obj) {
+  if (!res.writableEnded) res.write(JSON.stringify(obj) + '\n');
 }
 
 /**
@@ -315,28 +353,46 @@ function forwardRemote(target, range, res, depth) {
  */
 function runFfprobe(input) {
   const args = [
-    '-v', 'quiet',
+    '-v', 'error',
     '-hide_banner',
     '-print_format', 'json',
     '-show_format',
     '-show_streams',
     '-show_chapters',
     '-show_programs',
-    input,
   ];
+  const hls = isHlsInput(input);
+  if (hls) args.push('-allowed_extensions', 'ALL');
+  args.push(input);
+  const timeout = hls ? FFPROBE_HLS_TIMEOUT_MS : FFPROBE_TIMEOUT_MS;
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
-    execFile(FFPROBE_BIN, args, { timeout: FFPROBE_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(FFPROBE_BIN, args, { timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      logCommand('ffprobe', { bin: FFPROBE_BIN, args, startedAt, elapsedMs: Date.now() - startedAt, err, stdout, stderr });
+      const errText = (stderr && stderr.toString().trim()) || '';
       if (err) {
-        reject(new Error((stderr && stderr.toString()) || err.message));
+        const timedOut = err.killed || err.signal === 'SIGTERM';
+        reject(new Error(timedOut
+          ? `ffprobe 시간 초과(${Math.round(timeout / 1000)}s) — 원격 소스 응답이 느립니다. FFPROBE_HLS_TIMEOUT_MS로 조정 가능`
+          : (errText || err.message)));
         return;
       }
       try {
         resolve(JSON.parse(stdout.toString() || '{}'));
       } catch (e) {
-        reject(new Error('ffprobe JSON 파싱 실패: ' + e.message));
+        reject(new Error('ffprobe JSON 파싱 실패: ' + e.message + (errText ? ' / ' + errText : '')));
       }
     });
   });
+}
+
+/**
+ * 입력이 HLS(m3u8) 플레이리스트인지 확장자로 판별한다.
+ * @param {string} input 파일 경로 또는 URL
+ * @returns {boolean} HLS면 true
+ */
+function isHlsInput(input) {
+  return /\.m3u8(\?|#|$)/i.test(String(input));
 }
 
 /**
