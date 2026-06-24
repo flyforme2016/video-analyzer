@@ -363,10 +363,31 @@ body {
 
 .tabs { display: flex; border-bottom: 1px solid var(--border); }
 .tab {
-  background: none; border: none; color: var(--muted);
-  padding: 12px 16px; cursor: pointer; font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 12px 16px;
+  cursor: pointer;
+  font-size: 13px;
   border-bottom: 2px solid transparent;
 }
+.tab-label { line-height: 1.2; }
+.tab-spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tab-spin 0.75s linear infinite;
+}
+.tab-spinner[hidden] { display: none; }
+@keyframes tab-spin { to { transform: rotate(360deg); } }
+.tab.tab-loading { color: var(--text); }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
 .tab-body { padding: 0; }

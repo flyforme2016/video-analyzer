@@ -10,6 +10,7 @@ import {
 } from './playback.js';
 import { handleBuffer } from './container.js';
 import { probeViaUpload, probeViaUrl, probeViaLibrary } from './analysis.js';
+import { beginTabProgress, resetTabProgress, completeTabProgress } from './tab-progress.js';
 
 /**
  * 로컬 파일을 받아 재생, 바이트 파싱, ffprobe 분석을 수행한다.
@@ -23,12 +24,15 @@ export async function loadLocalFile(file) {
   const kindHint = detectPlaybackKindFromFile(file) || 'video';
   setPlayerSrc(makeObjectUrl(file), kindHint);
   setStatus('파일 분석·무결성 검사 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
+  beginTabProgress();
   try {
     state.fileSize = file.size;
     await parseBytesFromFile(file);
+    completeTabProgress('bytes');
     await probeViaUpload(file);
     finishStatus();
   } catch (err) {
+    resetTabProgress();
     setStatus('분석 중 오류: ' + (err.message || err), 'error');
   }
 }
@@ -45,12 +49,15 @@ export async function loadRemoteUrl(url) {
   const kindHint = detectPlaybackKindFromUrl(url) || 'video';
   setPlayerSrc('/api/proxy?url=' + encodeURIComponent(url), kindHint);
   setStatus('URL 분석·무결성 검사 중…', 'loading');
+  beginTabProgress();
   try {
     state.fileSize = 0;
     await parseBytesFromUrl(url);
+    completeTabProgress('bytes');
     await probeViaUrl(url);
     finishStatus();
   } catch (err) {
+    resetTabProgress();
     setStatus('분석 중 오류: ' + (err.message || err), 'error');
   }
 }
@@ -69,12 +76,15 @@ export async function loadServerFile(file) {
   const kindHint = detectPlaybackKindFromUrl(file.name) || 'video';
   setPlayerSrc(streamUrl, kindHint);
   setStatus('서버 파일 분석·무결성 검사 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
+  beginTabProgress();
   try {
     state.fileSize = file.size;
     await parseBytesFromServerFile(file.id, file.size);
+    completeTabProgress('bytes');
     await probeViaLibrary(file.id);
     finishStatus();
   } catch (err) {
+    resetTabProgress();
     setStatus('분석 중 오류: ' + (err.message || err), 'error');
   }
 }
@@ -123,6 +133,7 @@ function resetForNewSource(label) {
   dom.player.removeAttribute('src');
   dom.imagePlayer.removeAttribute('src');
   updatePlayerChrome();
+  resetTabProgress();
 }
 
 /**

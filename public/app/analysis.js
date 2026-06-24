@@ -5,6 +5,7 @@
 
 import { state, dom, escapeHtml, fmtBytes, pickStream, setStatus } from './state.js';
 import { reconcilePlaybackKind, detectPlaybackKindFromProbe } from './playback.js';
+import { completeTabProgress, completeTabProgressMany } from './tab-progress.js';
 
 /**
  * 파일을 서버로 업로드하여 ffprobe 분석을 요청하고 결과를 렌더한다.
@@ -86,9 +87,11 @@ async function consumeAnalysisStream(res, gen) {
 function handleAnalysisMessage(msg) {
   if (msg.stage === 'probe') {
     renderProbeResult(msg.ffprobe, msg.ffprobeError);
+    completeTabProgressMany(['probe', 'checks']);
     setStatus('ffprobe 완료 · 미디어 무결성 검사 중…', 'loading');
   } else if (msg.stage === 'integrity') {
     renderIntegrity(msg.integrity);
+    completeTabProgress('integrity');
   }
 }
 
