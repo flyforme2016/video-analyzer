@@ -3,7 +3,6 @@
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
-const net = require('net');
 const https = require('https');
 const { execFile } = require('child_process');
 const { logCommand } = require('./lib/cmd-logger');
@@ -32,24 +31,22 @@ const {
   isValidLibraryId,
 } = require('./lib/media-library');
 
-const DEFAULT_PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const PORT_FALLBACK_MAX = Number(process.env.PORT_FALLBACK_MAX) || 30;
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1GB
 const FFPROBE_TIMEOUT_MS = Number(process.env.FFPROBE_TIMEOUT_MS) || 60 * 1000;
 const FFPROBE_HLS_TIMEOUT_MS = Number(process.env.FFPROBE_HLS_TIMEOUT_MS) || 4 * 60 * 1000;
-const FFPROBE_BIN = resolveFfprobe();
-const FFMPEG_BIN = resolveFfmpeg();
+const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
+const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg';
 const SAFE_LOOKUP = createSafeLookup();
 
 /**
- * 애플리케이션 엔트리 포인트. 사용 가능한 포트를 찾은 뒤 서버를 시작한다.
- * @returns {Promise<void>}
+ * 애플리케이션 엔트리 포인트. 서버를 시작한다.
+ * @returns {void}
  */
-async function main() {
+function main() {
   startLogMaintenance();
-  const port = await resolveListenPort();
-  startServer(createApp(), port);
+  startServer(createApp(), PORT);
 }
 
 /**
@@ -71,135 +68,6 @@ function startServer(app, port) {
     console.error('서버 시작 실패:', err.message || err);
     process.exit(1);
   });
-}
-
-/**
- * 바인딩할 포트를 결정한다. PORT 미지정 시 기본 포트부터 빈 포트를 탐색한다.
- * @returns {Promise<number>} 사용 가능한 포트 번호
- * @throws {Error} 사용 가능한 포트를 찾지 못한 경우
- */
-async function resolveListenPort() {
-  const explicit = process.env.PORT !== undefined && String(process.env.PORT).trim() !== '';
-  const start = explicit ? Number(process.env.PORT) : DEFAULT_PORT;
-  const maxAttempts = explicit ? 1 : PORT_FALLBACK_MAX;
-  try {
-    const port = await findAvailablePort(HOST, start, maxAttempts);
-    if (!explicit && port !== start) {
-      console.warn(
-        `포트 ${start} 사용 불가 (WSL에서는 Windows가 점유해도 lsof/ss에 안 보일 수 있음) → ${port} 사용`
-      );
-    }
-    return port;
-  } catch (err) {
-    printPortConflictHelp(start, explicit);
-    throw err;
-  }
-}
-
-/**
- * host에서 start부터 순차적으로 bind 가능한 포트를 찾는다.
- * @param {string} host 바인딩 호스트
- * @param {number} startPort 시작 포트
- * @param {number} maxAttempts 최대 시도 횟수
- * @returns {Promise<number>} 사용 가능한 포트
- * @throws {Error} maxAttempts 내에 빈 포트가 없을 때
- */
-function findAvailablePort(host, startPort, maxAttempts) {
-  return new Promise((resolve, reject) => {
-    /**
-     * 단일 포트에 bind 테스트를 수행한다.
-     * @param {number} port 시도할 포트
-     * @param {number} left 남은 시도 횟수
-     * @returns {void}
-     */
-    function tryPort(port, left) {
-      if (left <= 0) {
-        reject(new Error(`포트 ${startPort}~${port - 1} 모두 사용 중`));
-        return;
-      }
-      const tester = net.createServer();
-      tester.once('error', (err) => {
-        if (err.code === 'EADDRINUSE') tryPort(port + 1, left - 1);
-        else reject(err);
-      });
-      tester.once('listening', () => {
-        tester.close(() => resolve(port));
-      });
-      tester.listen(port, host);
-    }
-    tryPort(startPort, maxAttempts);
-  });
-}
-
-/**
- * 포트 충돌 시 WSL/Windows 환경별 확인 방법을 출력한다.
- * @param {number} port 충돌이 난 포트
- * @param {boolean} explicit PORT 환경변수로 고정했는지 여부
- * @returns {void}
- */
-function printPortConflictHelp(port, explicit) {
-  console.error(`포트 ${port} (${HOST})을(를) 사용할 수 없습니다.`);
-  if (explicit) {
-    console.error('다른 포트 지정: PORT=3001 npm start');
-  }
-  console.error('WSL: ss -tlnp | grep :' + port);
-  console.error('Windows PowerShell: netstat -ano | findstr :' + port);
-  console.error('(WSL mirrored 모드에서는 Windows 점유가 Linux lsof에 안 보일 수 있음)');
-}
-
-/**
- * 사용할 ffprobe 실행 파일 경로를 결정한다.
- * 환경변수(FFPROBE_PATH) → 시스템 경로 → PATH의 'ffprobe' 순으로 탐색한다.
- * @returns {string} ffprobe 실행 파일 경로 또는 명령어 이름
- */
-function resolveFfprobe() {
-  return resolveTool('FFPROBE_PATH', 'ffprobe');
-}
-
-/**
- * 사용할 ffmpeg 실행 파일 경로를 결정한다.
- * @returns {string} ffmpeg 실행 파일 경로
- */
-function resolveFfmpeg() {
-  return resolveTool('FFMPEG_PATH', 'ffmpeg');
-}
-
-/**
- * ffprobe/ffmpeg 실행 파일 경로를 후보 목록에서 찾는다.
- * 환경변수 → 시스템 경로 → PATH 순으로 탐색한다. 필요 시 FFMPEG_PATH/FFPROBE_PATH로 덮어쓸 수 있다.
- * @param {string} envKey 환경변수 키
- * @param {string} fallback 기본 명령어 이름
- * @returns {string} 실행 파일 경로
- */
-function resolveTool(envKey, fallback) {
-  const base = process.env[envKey];
-  const candidates = [
-    base,
-    `/usr/local/bin/${fallback}`,
-    `/usr/bin/${fallback}`,
-    `/root/bin/${fallback}`,
-  ].filter(Boolean);
-  for (const c of candidates) {
-    try {
-      if (!fs.existsSync(c)) continue;
-      ensureExecutable(c);
-      return c;
-    } catch (e) { /* ignore */ }
-  }
-  return fallback;
-}
-
-/**
- * 실행 권한이 없으면 0755로 부여한다(git 클론 시 +x 비트 유실 대비).
- * @param {string} filePath 실행 파일 경로
- * @returns {void}
- */
-function ensureExecutable(filePath) {
-  try {
-    fs.accessSync(filePath, fs.constants.X_OK);
-  } catch (_) {
-    try { fs.chmodSync(filePath, 0o755); } catch (e) { /* 권한 변경 실패는 무시 */ }
-  }
 }
 
 /**
@@ -686,7 +554,4 @@ function handleError(err, req, res, next) {
   res.status(code).json({ error: '서버 오류', detail: String((err && err.message) || err) });
 }
 
-main().catch((err) => {
-  console.error(err.message || err);
-  process.exit(1);
-});
+main();
