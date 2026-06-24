@@ -7,6 +7,7 @@ const net = require('net');
 const https = require('https');
 const { execFile } = require('child_process');
 const { logCommand } = require('./lib/cmd-logger');
+const { startLogMaintenance } = require('./lib/log-rotate');
 const http = require('http');
 const { URL } = require('url');
 
@@ -15,6 +16,12 @@ const cors = require('cors');
 const multer = require('multer');
 
 const { analyzeIntegrity } = require('./lib/integrity');
+const {
+  SsrfError,
+  validateUrlSyntax,
+  assertUrlAllowed,
+  createSafeLookup,
+} = require('./lib/ssrf-guard');
 const {
   ensureLibraryReady,
   listLibraryFiles,
@@ -33,12 +40,14 @@ const FFPROBE_TIMEOUT_MS = Number(process.env.FFPROBE_TIMEOUT_MS) || 60 * 1000;
 const FFPROBE_HLS_TIMEOUT_MS = Number(process.env.FFPROBE_HLS_TIMEOUT_MS) || 4 * 60 * 1000;
 const FFPROBE_BIN = resolveFfprobe();
 const FFMPEG_BIN = resolveFfmpeg();
+const SAFE_LOOKUP = createSafeLookup();
 
 /**
  * 애플리케이션 엔트리 포인트. 사용 가능한 포트를 찾은 뒤 서버를 시작한다.
  * @returns {Promise<void>}
  */
 async function main() {
+  startLogMaintenance();
   const port = await resolveListenPort();
   startServer(createApp(), port);
 }
@@ -362,8 +371,10 @@ async function handleProbeFile(req, res) {
  */
 async function handleProbeUrl(req, res) {
   const target = req.body && req.body.url;
-  if (!isValidHttpUrl(target)) {
-    res.status(400).json({ error: '유효한 http(s) URL이 필요합니다.' });
+  try {
+    await assertUrlAllowed(target);
+  } catch (err) {
+    res.status(err instanceof SsrfError ? 400 : 502).json({ error: String(err.message || err) });
     return;
   }
   try {
@@ -418,8 +429,10 @@ function writeNdjson(res, obj) {
  */
 function handleProxy(req, res) {
   const target = req.query.url;
-  if (!isValidHttpUrl(target)) {
-    res.status(400).json({ error: '유효한 http(s) URL이 필요합니다.' });
+  try {
+    validateUrlSyntax(target);
+  } catch (err) {
+    res.status(400).json({ error: String(err.message || err) });
     return;
   }
   forwardRemote(target, req.headers.range, res, 0);
@@ -440,16 +453,16 @@ function forwardRemote(target, range, res, depth) {
   }
   let parsed;
   try {
-    parsed = new URL(target);
-  } catch (e) {
-    res.status(400).json({ error: '잘못된 URL' });
+    parsed = validateUrlSyntax(target);
+  } catch (err) {
+    if (!res.headersSent) res.status(400).json({ error: String(err.message || err) });
     return;
   }
   const client = parsed.protocol === 'https:' ? https : http;
   const headers = {};
   if (range) headers.Range = range;
 
-  const upstream = client.get(target, { headers }, (up) => {
+  const upstream = client.get(target, { headers, lookup: SAFE_LOOKUP }, (up) => {
     const status = up.statusCode || 502;
     if ([301, 302, 303, 307, 308].includes(status) && up.headers.location) {
       const next = new URL(up.headers.location, target).toString();
@@ -465,7 +478,9 @@ function forwardRemote(target, range, res, depth) {
     up.pipe(res);
   });
   upstream.on('error', (err) => {
-    if (!res.headersSent) res.status(502).json({ error: '원격 요청 실패', detail: String(err.message || err) });
+    if (res.headersSent) return;
+    if (err instanceof SsrfError) res.status(400).json({ error: String(err.message || err) });
+    else res.status(502).json({ error: '원격 요청 실패', detail: String(err.message || err) });
   });
 }
 
@@ -526,9 +541,34 @@ function isHlsInput(input) {
 function createUploader() {
   const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, os.tmpdir()),
-    filename: (req, file, cb) => cb(null, `va_${Date.now()}_${Math.random().toString(36).slice(2)}`),
+    filename: (req, file, cb) => cb(null, resolveProbeUploadFilename(file.originalname)),
   });
   return multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
+}
+
+/**
+ * 로컬 파일 분석용 임시 저장 파일명을 결정한다. 기본은 원본 파일명이며 충돌 시에만 접미사를 붙인다.
+ * @param {string} originalName 클라이언트가 보낸 원본 파일명
+ * @returns {string} tmpdir 기준 안전한 파일명
+ */
+function resolveProbeUploadFilename(originalName) {
+  const base = sanitizeProbeUploadFilename(originalName);
+  const dest = path.join(os.tmpdir(), base);
+  if (!fs.existsSync(dest)) return base;
+  const ext = path.extname(base);
+  const stem = path.basename(base, ext) || 'upload';
+  return `${stem}_${Date.now()}${ext}`;
+}
+
+/**
+ * 업로드 임시 파일명으로 쓸 원본 이름을 정리한다.
+ * @param {string} originalName 원본 파일명
+ * @returns {string} path.basename 적용·특수문자 제거 후 파일명
+ */
+function sanitizeProbeUploadFilename(originalName) {
+  const base = path.basename(String(originalName || 'upload').replace(/[\0\r\n]/g, ''));
+  const cleaned = base.replace(/[<>:"|?*]/g, '_').trim();
+  return cleaned || 'upload';
 }
 
 function createLibraryUploader() {
@@ -606,21 +646,6 @@ function guessMediaContentType(name) {
     '.m3u': 'application/vnd.apple.mpegurl',
   };
   return map[ext];
-}
-
-/**
- * 표현식이 유효한 http/https URL인지 검사한다.
- * @param {unknown} value 검사할 값
- * @returns {boolean} http(s) URL이면 true
- */
-function isValidHttpUrl(value) {
-  if (typeof value !== 'string' || !value) return false;
-  try {
-    const u = new URL(value);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch (e) {
-    return false;
-  }
 }
 
 /**
