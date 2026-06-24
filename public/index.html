@@ -29,7 +29,14 @@
       </div>
     </div>
     <div class="url-box">
-      <input type="text" id="urlInput" placeholder="https://example.com/video.mp4 (URL로 불러오기)" />
+      <div class="url-field" id="urlField">
+        <input type="text" id="urlInput" placeholder="https://example.com/video.mp4 (URL로 불러오기)" autocomplete="off" />
+        <div id="urlHistoryDropdown" class="url-history" hidden>
+          <div class="url-history-head">최근 불러온 URL</div>
+          <ul id="urlHistoryList" class="url-history-list"></ul>
+          <div id="urlHistoryEmpty" class="url-history-empty" hidden>최근 기록이 없습니다.</div>
+        </div>
+      </div>
       <button class="btn primary" id="urlBtn">URL 불러오기</button>
     </div>
   </section>

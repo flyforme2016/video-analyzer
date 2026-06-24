@@ -6,6 +6,19 @@ import { dom, cacheDom } from './state.js';
 import { loadLocalFile, loadRemoteUrl } from './loader.js';
 import { setAllTreeCollapsed } from './container.js';
 import { copyProbeJson } from './analysis.js';
+import { setupUrlHistory, addRecentUrl } from './url-history.js';
+
+/**
+ * URL 입력값을 최근 기록에 남기고 원격 분석을 시작한다.
+ * @param {string} url 분석할 URL
+ * @returns {void}
+ */
+function submitRemoteUrl(url) {
+  const trimmed = url.trim();
+  if (!trimmed) return;
+  addRecentUrl(trimmed);
+  loadRemoteUrl(trimmed);
+}
 
 /**
  * 앱을 초기화하고 DOM 참조 및 이벤트 핸들러를 등록한다.
@@ -18,13 +31,11 @@ function init() {
   dom.fileInput.addEventListener('change', (e) => {
     if (e.target.files && e.target.files[0]) loadLocalFile(e.target.files[0]);
   });
-  dom.urlBtn.addEventListener('click', () => {
-    const url = dom.urlInput.value.trim();
-    if (url) loadRemoteUrl(url);
-  });
+  dom.urlBtn.addEventListener('click', () => submitRemoteUrl(dom.urlInput.value));
   dom.urlInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') dom.urlBtn.click();
   });
+  setupUrlHistory(submitRemoteUrl);
   dom.copyProbe.addEventListener('click', copyProbeJson);
   setupBytesSplitter();
   setupTreeCollapse();

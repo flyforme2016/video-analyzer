@@ -34,7 +34,8 @@ export const dom = {};
  * @returns {void}
  */
 export function cacheDom() {
-  const ids = ['dropzone', 'fileInput', 'urlInput', 'urlBtn', 'status', 'player', 'imagePlayer',
+  const ids = ['dropzone', 'fileInput', 'urlField', 'urlInput', 'urlBtn', 'urlHistoryDropdown',
+    'urlHistoryList', 'urlHistoryEmpty', 'status', 'player', 'imagePlayer',
     'playerStage', 'playerTitle', 'playerKindBadge', 'playerNotice',
     'sourceLabel', 'quickMeta', 'boxTree', 'treeEmpty', 'detailTitle', 'fieldList',
     'hexDump', 'probeSummary', 'probeJson', 'probeElapsed', 'copyProbe',
