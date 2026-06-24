@@ -55,15 +55,17 @@ export async function probeViaLibrary(id) {
  * @throws {Error} 스트림 시작 전 서버가 오류 응답을 준 경우
  */
 async function consumeAnalysisStream(res, gen) {
+  if (!res.ok) {
+    throw new Error(await readHttpErrorMessage(res));
+  }
   if (!res.body) {
-    let data = {};
-    try { data = await res.json(); } catch (_) { /* ignore */ }
-    throw new Error(data.detail || data.error || '분석 실패');
+    throw new Error('분석 응답 본문이 없습니다.');
   }
   if (gen === state.loadGeneration) setIntegrityLoading();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let gotProbe = false;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -72,11 +74,31 @@ async function consumeAnalysisStream(res, gen) {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
-      if (line && gen === state.loadGeneration) handleAnalysisMessage(JSON.parse(line));
+      if (!line || gen !== state.loadGeneration) continue;
+      let msg;
+      try {
+        msg = JSON.parse(line);
+      } catch (e) {
+        throw new Error('분석 스트림 파싱 실패: ' + (e.message || e));
+      }
+      if (msg.stage === 'probe') gotProbe = true;
+      handleAnalysisMessage(msg);
     }
   }
   const tail = buf.trim();
-  if (tail && gen === state.loadGeneration) handleAnalysisMessage(JSON.parse(tail));
+  if (tail && gen === state.loadGeneration) {
+    let msg;
+    try {
+      msg = JSON.parse(tail);
+    } catch (e) {
+      throw new Error('분석 스트림 파싱 실패: ' + (e.message || e));
+    }
+    if (msg.stage === 'probe') gotProbe = true;
+    handleAnalysisMessage(msg);
+  }
+  if (!gotProbe) {
+    throw new Error('서버가 분석 결과를 반환하지 않았습니다.');
+  }
 }
 
 /**
@@ -159,6 +181,39 @@ function renderProbeError(probeError) {
   dom.checksScore.innerHTML =
     `<div class="score-badge"><span class="muted">ffprobe 실패로 트랜스코딩 점검을 건너뜀</span></div>`;
   dom.checksList.innerHTML = '';
+}
+
+/**
+ * 분석 API가 시작 단계에서 실패했을 때 ffprobe·무결성 탭에 오류를 표시한다.
+ * @param {string} message 사용자에게 보여줄 오류 메시지
+ * @returns {void}
+ */
+export function reportAnalysisFailure(message) {
+  const msg = message || '분석에 실패했습니다.';
+  renderProbeError(msg);
+  if (!dom.integrityScore) return;
+  dom.integrityScore.innerHTML =
+    `<div class="score-badge"><span class="muted">${escapeHtml(msg)}</span></div>`;
+  dom.integrityMeta.innerHTML = '';
+  dom.integrityList.innerHTML = '';
+}
+
+/**
+ * 실패한 fetch 응답에서 사용자용 오류 메시지를 추출한다.
+ * @param {Response} res HTTP 응답
+ * @returns {Promise<string>} 표시할 메시지
+ */
+async function readHttpErrorMessage(res) {
+  let data = {};
+  try {
+    data = await res.json();
+  } catch (_) { /* ignore */ }
+  const detail = data.detail || data.error;
+  if (res.status === 413) {
+    return detail || '업로드 파일이 서버 크기 한도를 초과했습니다.';
+  }
+  if (detail) return String(detail);
+  return `분석 실패 (HTTP ${res.status})`;
 }
 
 /**

@@ -9,7 +9,7 @@ import {
   setPlayerSrc, destroyMsePlayer, setPlayerNotice, updatePlayerChrome, makeObjectUrl,
 } from './playback.js';
 import { handleBuffer } from './container.js';
-import { probeViaUpload, probeViaUrl, probeViaLibrary } from './analysis.js';
+import { probeViaUpload, probeViaUrl, probeViaLibrary, reportAnalysisFailure } from './analysis.js';
 import { beginTabProgress, resetTabProgress, completeTabProgress } from './tab-progress.js';
 
 /**
@@ -32,8 +32,7 @@ export async function loadLocalFile(file) {
     await probeViaUpload(file);
     finishStatus();
   } catch (err) {
-    resetTabProgress();
-    setStatus('분석 중 오류: ' + (err.message || err), 'error');
+    handleLoadError(err);
   }
 }
 
@@ -57,8 +56,7 @@ export async function loadRemoteUrl(url) {
     await probeViaUrl(url);
     finishStatus();
   } catch (err) {
-    resetTabProgress();
-    setStatus('분석 중 오류: ' + (err.message || err), 'error');
+    handleLoadError(err);
   }
 }
 
@@ -84,9 +82,21 @@ export async function loadServerFile(file) {
     await probeViaLibrary(file.id);
     finishStatus();
   } catch (err) {
-    resetTabProgress();
-    setStatus('분석 중 오류: ' + (err.message || err), 'error');
+    handleLoadError(err);
   }
+}
+
+/**
+ * 분석 흐름 실패 시 스피너·상태·탭 UI를 정리한다.
+ * @param {Error|string} err 발생한 오류
+ * @returns {void}
+ */
+function handleLoadError(err) {
+  const msg = String((err && err.message) || err || '알 수 없는 오류');
+  resetTabProgress();
+  reportAnalysisFailure(msg);
+  setStatus('분석 중 오류: ' + msg, 'error');
+  dom.status?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 /**
