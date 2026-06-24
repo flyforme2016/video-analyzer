@@ -166,6 +166,34 @@ body {
   color: var(--muted);
 }
 .library-status.loading { border-color: var(--accent); color: var(--text); }
+.library-status-text { margin-bottom: 6px; }
+.library-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: #0e1117;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.library-progress.indeterminate .library-progress-bar {
+  width: 35% !important;
+  animation: library-progress-indeterminate 1.1s ease-in-out infinite;
+}
+@keyframes library-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+.library-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #6ea8ff);
+  transition: width 0.15s ease;
+}
+.library-progress-label {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 #libraryUploadBtn.disabled { opacity: 0.55; pointer-events: none; }
 .server-file-list {
   list-style: none;

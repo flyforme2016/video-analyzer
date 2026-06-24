@@ -62,22 +62,23 @@ export async function refreshServerFileList() {
 }
 
 /**
- * 파일을 서버 라이브러리에 업로드한다.
+ * 파일을 서버 라이브러리에 업로드한다. XMLHttpRequest로 진행률을 표시한다.
  * @param {File} file 업로드할 파일
  * @returns {Promise<void>}
  */
 export async function uploadFileToLibrary(file) {
   if (!file) return;
-  setLibraryBusy(true, `"${file.name}" 업로드 중…`);
+  showUploadProgress(file.name, 0, file.size, file.size > 0);
   try {
-    const form = new FormData();
-    form.append('video', file);
-    const res = await fetch('/api/library', { method: 'POST', body: form });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || data.error || '업로드 실패');
+    await postLibraryUploadWithProgress(file, (loaded, total) => {
+      showUploadProgress(file.name, loaded, total, total > 0);
+    });
+    hideUploadProgress();
+    setLibraryBusy(true, `"${file.name}" 처리 중…`);
     await refreshServerFileList();
-    setLibraryBusy(false, '');
+    clearLibraryStatus();
   } catch (err) {
+    hideUploadProgress();
     setLibraryBusy(false, '업로드 실패: ' + (err.message || err));
   }
 }
@@ -92,6 +93,38 @@ async function fetchLibraryList() {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.detail || data.error || '목록 조회 실패');
   return Array.isArray(data.files) ? data.files : [];
+}
+
+/**
+ * FormData 업로드를 XMLHttpRequest로 전송하고 upload progress 이벤트를 받는다.
+ * @param {File} file 업로드할 파일
+ * @param {(loaded:number, total:number) => void} onProgress 진행 콜백
+ * @returns {Promise<{file:object}>} 서버 응답 JSON
+ */
+function postLibraryUploadWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append('video', file);
+
+    xhr.open('POST', '/api/library');
+    xhr.upload.addEventListener('progress', (e) => {
+      onProgress(e.loaded, e.lengthComputable ? e.total : 0);
+    });
+    xhr.addEventListener('load', () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || '{}'); } catch (_) { /* ignore */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+        return;
+      }
+      reject(new Error(data.detail || data.error || `업로드 실패 (HTTP ${xhr.status})`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('네트워크 오류')));
+    xhr.addEventListener('abort', () => reject(new Error('업로드가 취소되었습니다')));
+
+    xhr.send(form);
+  });
 }
 
 /**
@@ -148,10 +181,58 @@ async function handleDeleteClick(id, e) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || data.error || '삭제 실패');
     await refreshServerFileList();
-    setLibraryBusy(false, '');
+    clearLibraryStatus();
   } catch (err) {
     setLibraryBusy(false, '삭제 실패: ' + (err.message || err));
   }
+}
+
+/**
+ * 업로드 진행률 UI를 갱신한다.
+ * @param {string} fileName 파일명
+ * @param {number} loaded 전송된 바이트
+ * @param {number} total 전체 바이트(0이면 불명)
+ * @param {boolean} computable total이 신뢰 가능한지
+ * @returns {void}
+ */
+function showUploadProgress(fileName, loaded, total, computable) {
+  if (!dom.libraryStatus) return;
+  dom.libraryStatus.hidden = false;
+  dom.libraryStatus.classList.add('loading');
+
+  if (dom.libraryStatusText) {
+    dom.libraryStatusText.textContent = `"${fileName}" 업로드 중…`;
+  }
+  if (dom.libraryProgress) {
+    dom.libraryProgress.hidden = false;
+    dom.libraryProgress.classList.toggle('indeterminate', !computable);
+  }
+  if (dom.libraryProgressBar) {
+    const pct = computable && total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+    dom.libraryProgressBar.style.width = `${pct}%`;
+  }
+  if (dom.libraryProgressLabel) {
+    if (computable && total > 0) {
+      const pct = Math.min(100, Math.round((loaded / total) * 100));
+      dom.libraryProgressLabel.textContent = `${pct}% · ${fmtBytes(loaded)} / ${fmtBytes(total)}`;
+    } else {
+      dom.libraryProgressLabel.textContent = `${fmtBytes(loaded)} 전송됨`;
+    }
+  }
+  if (dom.libraryUploadBtn) dom.libraryUploadBtn.classList.add('disabled');
+}
+
+/**
+ * 업로드 진행률 UI를 숨긴다.
+ * @returns {void}
+ */
+function hideUploadProgress() {
+  if (dom.libraryProgress) {
+    dom.libraryProgress.hidden = true;
+    dom.libraryProgress.classList.remove('indeterminate');
+  }
+  if (dom.libraryProgressBar) dom.libraryProgressBar.style.width = '0%';
+  if (dom.libraryProgressLabel) dom.libraryProgressLabel.textContent = '';
 }
 
 /**
@@ -161,12 +242,27 @@ async function handleDeleteClick(id, e) {
  * @returns {void}
  */
 function setLibraryBusy(busy, message) {
+  hideUploadProgress();
   if (dom.libraryStatus) {
     dom.libraryStatus.hidden = !message;
-    dom.libraryStatus.textContent = message || '';
     dom.libraryStatus.classList.toggle('loading', busy);
   }
+  if (dom.libraryStatusText) dom.libraryStatusText.textContent = message || '';
   if (dom.libraryUploadBtn) dom.libraryUploadBtn.classList.toggle('disabled', busy);
+}
+
+/**
+ * 라이브러리 상태 배너를 초기화한다.
+ * @returns {void}
+ */
+function clearLibraryStatus() {
+  hideUploadProgress();
+  if (dom.libraryStatus) {
+    dom.libraryStatus.hidden = true;
+    dom.libraryStatus.classList.remove('loading');
+  }
+  if (dom.libraryStatusText) dom.libraryStatusText.textContent = '';
+  if (dom.libraryUploadBtn) dom.libraryUploadBtn.classList.remove('disabled');
 }
 
 /**

@@ -52,7 +52,13 @@
         <input type="file" id="libraryUploadInput" accept="video/*,image/gif,application/vnd.apple.mpegurl,.mp4,.mov,.m4v,.m4a,.3gp,.gif,.webm,.mkv,.avi,.flv,.f4v,.ts,.m2ts,.mts,.m3u8,.m3u" hidden />
       </label>
     </div>
-    <div id="libraryStatus" class="library-status" hidden></div>
+    <div id="libraryStatus" class="library-status" hidden>
+      <div id="libraryStatusText" class="library-status-text"></div>
+      <div id="libraryProgress" class="library-progress" hidden>
+        <div id="libraryProgressBar" class="library-progress-bar" style="width:0%"></div>
+      </div>
+      <div id="libraryProgressLabel" class="library-progress-label"></div>
+    </div>
     <ul id="serverFileList" class="server-file-list"></ul>
     <div id="serverFileEmpty" class="server-file-empty">업로드된 파일이 없습니다.</div>
   </section>
@@ -78,10 +84,22 @@
 
     <section class="panel tabs-panel">
       <nav class="tabs">
-        <button class="tab active" data-tab="bytes">바이트 / 박스</button>
-        <button class="tab" data-tab="probe">ffprobe</button>
-        <button class="tab" data-tab="checks">트랜스코딩 점검</button>
-        <button class="tab" data-tab="integrity">미디어 무결성</button>
+        <button class="tab active" data-tab="bytes">
+          <span class="tab-label">바이트 / 박스</span>
+          <span class="tab-spinner" hidden aria-hidden="true"></span>
+        </button>
+        <button class="tab" data-tab="probe">
+          <span class="tab-label">ffprobe</span>
+          <span class="tab-spinner" hidden aria-hidden="true"></span>
+        </button>
+        <button class="tab" data-tab="checks">
+          <span class="tab-label">트랜스코딩 점검</span>
+          <span class="tab-spinner" hidden aria-hidden="true"></span>
+        </button>
+        <button class="tab" data-tab="integrity">
+          <span class="tab-label">미디어 무결성</span>
+          <span class="tab-spinner" hidden aria-hidden="true"></span>
+        </button>
       </nav>
 
       <div class="tab-body">
