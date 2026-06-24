@@ -15,6 +15,15 @@ const cors = require('cors');
 const multer = require('multer');
 
 const { analyzeIntegrity } = require('./lib/integrity');
+const {
+  ensureLibraryReady,
+  listLibraryFiles,
+  addLibraryFile,
+  deleteLibraryFile,
+  getLibraryFileMeta,
+  resolveLibraryFilePath,
+  isValidLibraryId,
+} = require('./lib/media-library');
 
 const DEFAULT_PORT = 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -189,13 +198,20 @@ function ensureExecutable(filePath) {
  * @returns {import('express').Express} 구성된 Express 앱 인스턴스
  */
 function createApp() {
+  ensureLibraryReady();
   const app = express();
   const upload = createUploader();
+  const libraryUpload = createLibraryUploader();
 
   app.use(cors());
   app.use(express.json({ limit: '2mb' }));
   app.use(express.static(path.join(__dirname, 'public')));
 
+  app.get('/api/library', handleLibraryList);
+  app.post('/api/library', libraryUpload.single('video'), handleLibraryUpload);
+  app.delete('/api/library/:id', handleLibraryDelete);
+  app.get('/api/library/:id/file', handleLibraryStream);
+  app.post('/api/probe/library/:id', handleProbeLibrary);
   app.post('/api/probe/file', upload.single('video'), handleProbeFile);
   app.post('/api/probe/url', handleProbeUrl);
   app.get('/api/proxy', handleProxy);
@@ -203,6 +219,117 @@ function createApp() {
 
   app.use(handleError);
   return app;
+}
+
+/**
+ * 라이브러리에 저장된 파일 목록을 JSON으로 반환한다.
+ * @param {import('express').Request} req 요청
+ * @param {import('express').Response} res 응답
+ * @returns {Promise<void>}
+ */
+async function handleLibraryList(req, res) {
+  try {
+    const files = await listLibraryFiles();
+    res.json({ files });
+  } catch (err) {
+    res.status(500).json({ error: '목록 조회 실패', detail: String(err.message || err) });
+  }
+}
+
+/**
+ * 업로드된 파일을 서버 라이브러리에 영구 저장한다.
+ * @param {import('express').Request} req multipart 업로드(req.file)
+ * @param {import('express').Response} res 저장된 파일 메타데이터 JSON
+ * @returns {Promise<void>}
+ */
+async function handleLibraryUpload(req, res) {
+  if (!req.file) {
+    res.status(400).json({ error: '업로드된 파일이 없습니다. (필드명: video)' });
+    return;
+  }
+  const tempPath = req.file.path;
+  try {
+    const file = await addLibraryFile(tempPath, req.file.originalname, req.file.size);
+    res.status(201).json({ file });
+  } catch (err) {
+    safeUnlink(tempPath);
+    res.status(500).json({ error: '서버 저장 실패', detail: String(err.message || err) });
+  }
+}
+
+/**
+ * 라이브러리 파일을 삭제한다.
+ * @param {import('express').Request} req params.id에 파일 ID
+ * @param {import('express').Response} res 응답
+ * @returns {Promise<void>}
+ */
+async function handleLibraryDelete(req, res) {
+  const id = req.params.id;
+  if (!isValidLibraryId(id)) {
+    res.status(400).json({ error: '잘못된 파일 ID' });
+    return;
+  }
+  try {
+    const removed = await deleteLibraryFile(id);
+    if (!removed) {
+      res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+      return;
+    }
+    res.json({ ok: true, id });
+  } catch (err) {
+    res.status(500).json({ error: '삭제 실패', detail: String(err.message || err) });
+  }
+}
+
+/**
+ * 라이브러리 파일을 Range 요청을 지원하며 스트리밍한다.
+ * @param {import('express').Request} req params.id, Range 헤더
+ * @param {import('express').Response} res 파일 스트림
+ * @returns {Promise<void>}
+ */
+async function handleLibraryStream(req, res) {
+  const id = req.params.id;
+  if (!isValidLibraryId(id)) {
+    res.status(400).json({ error: '잘못된 파일 ID' });
+    return;
+  }
+  const meta = await getLibraryFileMeta(id);
+  const filePath = resolveLibraryFilePath(id);
+  if (!meta || !filePath) {
+    res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+    return;
+  }
+  streamLocalFile(filePath, meta.name, req.headers.range, res);
+}
+
+/**
+ * 라이브러리에 저장된 파일을 ffprobe·무결성 분석한다.
+ * @param {import('express').Request} req params.id에 파일 ID
+ * @param {import('express').Response} res NDJSON 스트림
+ * @returns {Promise<void>}
+ */
+async function handleProbeLibrary(req, res) {
+  const id = req.params.id;
+  if (!isValidLibraryId(id)) {
+    res.status(400).json({ error: '잘못된 파일 ID' });
+    return;
+  }
+  const meta = await getLibraryFileMeta(id);
+  const filePath = resolveLibraryFilePath(id);
+  if (!meta || !filePath) {
+    res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+    return;
+  }
+  try {
+    await streamAnalysis(
+      res,
+      { type: 'library', id: meta.id, name: meta.name, size: meta.size },
+      filePath
+    );
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: '분석 실행 실패', detail: String(err.message || err) });
+    else res.end();
+  }
 }
 
 /**
@@ -402,6 +529,83 @@ function createUploader() {
     filename: (req, file, cb) => cb(null, `va_${Date.now()}_${Math.random().toString(36).slice(2)}`),
   });
   return multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
+}
+
+function createLibraryUploader() {
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) => cb(null, `va_lib_${Date.now()}_${Math.random().toString(36).slice(2)}`),
+  });
+  return multer({ storage, limits: { fileSize: MAX_UPLOAD_BYTES } });
+}
+
+/**
+ * 로컬 파일을 Range 지원으로 클라이언트에 스트리밍한다.
+ * @param {string} filePath 파일 절대 경로
+ * @param {string} displayName Content-Disposition용 표시 이름
+ * @param {string|undefined} range Range 요청 헤더
+ * @param {import('express').Response} res Express 응답
+ * @returns {void}
+ */
+function streamLocalFile(filePath, displayName, range, res) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+    return;
+  }
+  const contentType = guessMediaContentType(displayName);
+  res.setHeader('Accept-Ranges', 'bytes');
+  if (contentType) res.setHeader('Content-Type', contentType);
+
+  if (range) {
+    const m = /^bytes=(\d+)-(\d*)$/i.exec(String(range));
+    if (m) {
+      const start = parseInt(m[1], 10);
+      const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+      if (start >= stat.size || end < start) {
+        res.status(416).setHeader('Content-Range', `bytes */${stat.size}`);
+        res.end();
+        return;
+      }
+      const chunkEnd = Math.min(end, stat.size - 1);
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${chunkEnd}/${stat.size}`);
+      res.setHeader('Content-Length', String(chunkEnd - start + 1));
+      fs.createReadStream(filePath, { start, end: chunkEnd }).pipe(res);
+      return;
+    }
+  }
+
+  res.setHeader('Content-Length', String(stat.size));
+  fs.createReadStream(filePath).pipe(res);
+}
+
+/**
+ * 파일명 확장자로 미디어 Content-Type을 추정한다.
+ * @param {string} name 파일명
+ * @returns {string|undefined} MIME 타입(알 수 없으면 undefined)
+ */
+function guessMediaContentType(name) {
+  const ext = path.extname(String(name || '')).toLowerCase();
+  const map = {
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/x-m4v',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo',
+    '.flv': 'video/x-flv',
+    '.f4v': 'video/x-flv',
+    '.ts': 'video/mp2t',
+    '.m2ts': 'video/mp2t',
+    '.mts': 'video/mp2t',
+    '.gif': 'image/gif',
+    '.m3u8': 'application/vnd.apple.mpegurl',
+    '.m3u': 'application/vnd.apple.mpegurl',
+  };
+  return map[ext];
 }
 
 /**

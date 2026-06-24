@@ -9,7 +9,7 @@ import {
   destroyMsePlayer, setPlayerNotice, updatePlayerChrome, makeObjectUrl,
 } from './playback.js';
 import { handleBuffer } from './container.js';
-import { probeViaUpload, probeViaUrl } from './analysis.js';
+import { probeViaUpload, probeViaUrl, probeViaLibrary } from './analysis.js';
 
 /**
  * 로컬 파일을 받아 재생, 바이트 파싱, ffprobe 분석을 수행한다.
@@ -56,6 +56,30 @@ export async function loadRemoteUrl(url) {
 }
 
 /**
+ * 서버 라이브러리에 저장된 파일을 불러 분석한다.
+ * @param {{id:string, name:string, size:number}} file 서버 파일 메타데이터
+ * @returns {Promise<void>}
+ */
+export async function loadServerFile(file) {
+  resetForNewSource(`${file.name} · ${fmtBytes(file.size)} [서버]`);
+  state.sourceIsLocal = false;
+  state.sourceUrl = null;
+  state.serverFileId = file.id;
+  const streamUrl = `/api/library/${encodeURIComponent(file.id)}/file`;
+  const kindHint = detectPlaybackKindFromUrl(file.name) || 'video';
+  setPlayerSrc(streamUrl, kindHint);
+  setStatus('서버 파일 분석·무결성 검사 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
+  try {
+    state.fileSize = file.size;
+    await parseBytesFromServerFile(file.id, file.size);
+    await probeViaLibrary(file.id);
+    finishStatus();
+  } catch (err) {
+    setStatus('분석 중 오류: ' + (err.message || err), 'error');
+  }
+}
+
+/**
  * 새 소스를 불러오기 전에 UI 상태와 패널을 초기화한다.
  * @param {string} label 소스 라벨(파일명/URL)
  * @returns {void}
@@ -91,6 +115,7 @@ function resetForNewSource(label) {
   state.appliedKind = null;
   state.sourceUrl = null;
   state.sourceIsLocal = false;
+  state.serverFileId = null;
   setPlayerNotice('');
   dom.player.hidden = true;
   dom.imagePlayer.hidden = true;
@@ -125,6 +150,26 @@ async function parseBytesFromUrl(url) {
   });
   if (!res.ok && res.status !== 206) throw new Error('바이트를 가져오지 못했습니다 (HTTP ' + res.status + ')');
   state.fileSize = parseContentRangeTotal(res.headers.get('content-range'));
+  const buffer = await res.arrayBuffer();
+  if (gen !== state.loadGeneration) return;
+  const partial = res.status === 206 || buffer.byteLength >= MAX_PARSE_BYTES;
+  handleBuffer(buffer, partial);
+}
+
+/**
+ * 서버 라이브러리 파일의 선두 바이트를 받아 박스 트리를 파싱·렌더한다.
+ * @param {string} id 서버 파일 ID
+ * @param {number} knownSize 알려진 전체 크기(없으면 0)
+ * @returns {Promise<void>}
+ */
+async function parseBytesFromServerFile(id, knownSize) {
+  const gen = state.loadGeneration;
+  const res = await fetch(`/api/library/${encodeURIComponent(id)}/file`, {
+    headers: { Range: `bytes=0-${MAX_PARSE_BYTES - 1}` },
+  });
+  if (!res.ok && res.status !== 206) throw new Error('바이트를 가져오지 못했습니다 (HTTP ' + res.status + ')');
+  const ranged = parseContentRangeTotal(res.headers.get('content-range'));
+  state.fileSize = ranged || knownSize || 0;
   const buffer = await res.arrayBuffer();
   if (gen !== state.loadGeneration) return;
   const partial = res.status === 206 || buffer.byteLength >= MAX_PARSE_BYTES;

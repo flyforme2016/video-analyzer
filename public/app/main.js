@@ -3,10 +3,11 @@
  */
 
 import { dom, cacheDom } from './state.js';
-import { loadLocalFile, loadRemoteUrl } from './loader.js';
+import { loadLocalFile, loadRemoteUrl, loadServerFile } from './loader.js';
 import { setAllTreeCollapsed } from './container.js';
 import { copyProbeJson } from './analysis.js';
 import { setupUrlHistory, addRecentUrl } from './url-history.js';
+import { setupServerLibrary } from './server-library.js';
 
 /**
  * URL 입력값을 최근 기록에 남기고 원격 분석을 시작한다.
@@ -36,6 +37,7 @@ function init() {
     if (e.key === 'Enter') dom.urlBtn.click();
   });
   setupUrlHistory(submitRemoteUrl);
+  setupServerLibrary(loadServerFile);
   dom.copyProbe.addEventListener('click', copyProbeJson);
   setupBytesSplitter();
   setupTreeCollapse();

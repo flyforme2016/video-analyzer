@@ -41,6 +41,22 @@
     </div>
   </section>
 
+  <section class="library-bar">
+    <div class="library-head">
+      <div>
+        <h2 class="library-title">서버 파일</h2>
+        <p class="library-desc muted">서버에 저장한 파일을 선택해 분석합니다</p>
+      </div>
+      <label class="btn" id="libraryUploadBtn">
+        서버에 업로드
+        <input type="file" id="libraryUploadInput" accept="video/*,image/gif,application/vnd.apple.mpegurl,.mp4,.mov,.m4v,.m4a,.3gp,.gif,.webm,.mkv,.avi,.flv,.f4v,.ts,.m2ts,.mts,.m3u8,.m3u" hidden />
+      </label>
+    </div>
+    <div id="libraryStatus" class="library-status" hidden></div>
+    <ul id="serverFileList" class="server-file-list"></ul>
+    <div id="serverFileEmpty" class="server-file-empty">업로드된 파일이 없습니다.</div>
+  </section>
+
   <div id="status" class="status" hidden></div>
 
   <main class="layout">

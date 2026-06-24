@@ -25,6 +25,11 @@ temp/
 uploads/
 *.tmp
 
+# Bundled ffmpeg/ffprobe binaries (use system package instead)
+ffprobe_v1
+ffmpeg_v1
+vendor/
+
 # Test media samples
 *.mp4
 *.mov

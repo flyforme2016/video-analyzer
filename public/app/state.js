@@ -22,6 +22,7 @@ export const state = {
   appliedKind: null,
   sourceUrl: null,
   sourceIsLocal: false,
+  serverFileId: null,
   loadGeneration: 0,
   probe: null,
   integrity: null,
@@ -35,7 +36,8 @@ export const dom = {};
  */
 export function cacheDom() {
   const ids = ['dropzone', 'fileInput', 'urlField', 'urlInput', 'urlBtn', 'urlHistoryDropdown',
-    'urlHistoryList', 'urlHistoryEmpty', 'status', 'player', 'imagePlayer',
+    'urlHistoryList', 'urlHistoryEmpty', 'libraryUploadInput', 'libraryUploadBtn', 'libraryStatus',
+    'serverFileList', 'serverFileEmpty', 'status', 'player', 'imagePlayer',
     'playerStage', 'playerTitle', 'playerKindBadge', 'playerNotice',
     'sourceLabel', 'quickMeta', 'boxTree', 'treeEmpty', 'detailTitle', 'fieldList',
     'hexDump', 'probeSummary', 'probeJson', 'probeElapsed', 'copyProbe',

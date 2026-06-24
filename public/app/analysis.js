@@ -35,6 +35,17 @@ export async function probeViaUrl(url) {
 }
 
 /**
+ * 서버 라이브러리에 저장된 파일의 ffprobe 분석을 요청한다.
+ * @param {string} id 서버 파일 ID
+ * @returns {Promise<void>}
+ */
+export async function probeViaLibrary(id) {
+  const gen = state.loadGeneration;
+  const res = await fetch(`/api/probe/library/${encodeURIComponent(id)}`, { method: 'POST' });
+  await consumeAnalysisStream(res, gen);
+}
+
+/**
  * NDJSON 분석 스트림을 읽어 단계(ffprobe/무결성)별로 도착 즉시 렌더한다.
  * ffprobe가 먼저 끝나면 트랜스코딩 점검까지 바로 표시되고, 무결성은 도착할 때 갱신된다.
  * @param {Response} res 스트리밍 본문을 가진 fetch 응답
