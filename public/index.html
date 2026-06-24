@@ -63,7 +63,13 @@
     <div id="serverFileEmpty" class="server-file-empty">업로드된 파일이 없습니다.</div>
   </section>
 
-  <div id="status" class="status" hidden></div>
+  <div id="status" class="status" hidden>
+    <div id="statusText" class="status-text"></div>
+    <div id="statusProgress" class="status-progress" hidden>
+      <div id="statusProgressBar" class="status-progress-bar" style="width:0%"></div>
+    </div>
+    <div id="statusProgressLabel" class="status-progress-label"></div>
+  </div>
 
   <main class="layout">
     <section class="panel player-panel">

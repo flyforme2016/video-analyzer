@@ -10,6 +10,7 @@ import {
 } from './playback.js';
 import { handleBuffer } from './container.js';
 import { probeViaUpload, probeViaUrl, probeViaLibrary, reportAnalysisFailure } from './analysis.js';
+import { hideAnalysisUploadProgress } from './analysis-upload-progress.js';
 import { beginTabProgress, resetTabProgress, completeTabProgress } from './tab-progress.js';
 
 /**
@@ -93,6 +94,7 @@ export async function loadServerFile(file) {
  */
 function handleLoadError(err) {
   const msg = String((err && err.message) || err || '알 수 없는 오류');
+  hideAnalysisUploadProgress();
   resetTabProgress();
   reportAnalysisFailure(msg);
   setStatus('분석 중 오류: ' + msg, 'error');

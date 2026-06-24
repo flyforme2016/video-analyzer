@@ -6,18 +6,22 @@
 import { state, dom, escapeHtml, fmtBytes, pickStream, setStatus } from './state.js';
 import { reconcilePlaybackKind, detectPlaybackKindFromProbe, setPlayerNotice, destroyMsePlayer } from './playback.js';
 import { completeTabProgress, completeTabProgressMany } from './tab-progress.js';
+import { showAnalysisUploadProgress, hideAnalysisUploadProgress } from './analysis-upload-progress.js';
 
 /**
  * 파일을 서버로 업로드하여 ffprobe 분석을 요청하고 결과를 렌더한다.
+ * XMLHttpRequest upload progress로 전송 진행률을 표시한다.
  * @param {File} file 분석할 파일
  * @returns {Promise<void>}
  */
 export async function probeViaUpload(file) {
   const gen = state.loadGeneration;
-  const form = new FormData();
-  form.append('video', file);
-  const res = await fetch('/api/probe/file', { method: 'POST', body: form });
-  await consumeAnalysisStream(res, gen);
+  showAnalysisUploadProgress(file.name, 0, file.size, file.size > 0);
+  try {
+    await postProbeUploadWithProgress(file, gen);
+  } finally {
+    hideAnalysisUploadProgress();
+  }
 }
 
 /**
@@ -70,35 +74,164 @@ async function consumeAnalysisStream(res, gen) {
     const { value, done } = await reader.read();
     if (done) break;
     buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line || gen !== state.loadGeneration) continue;
-      let msg;
-      try {
-        msg = JSON.parse(line);
-      } catch (e) {
-        throw new Error('분석 스트림 파싱 실패: ' + (e.message || e));
-      }
-      if (msg.stage === 'probe') gotProbe = true;
-      handleAnalysisMessage(msg);
-    }
+    const parsed = feedAnalysisNdjson(buf, gen);
+    buf = parsed.buf;
+    if (parsed.gotProbe) gotProbe = true;
   }
   const tail = buf.trim();
   if (tail && gen === state.loadGeneration) {
-    let msg;
-    try {
-      msg = JSON.parse(tail);
-    } catch (e) {
-      throw new Error('분석 스트림 파싱 실패: ' + (e.message || e));
-    }
+    const msg = parseAnalysisLine(tail);
     if (msg.stage === 'probe') gotProbe = true;
     handleAnalysisMessage(msg);
   }
   if (!gotProbe) {
     throw new Error('서버가 분석 결과를 반환하지 않았습니다.');
   }
+}
+
+/**
+ * FormData 업로드를 XMLHttpRequest로 보내고 NDJSON 응답을 스트리밍 처리한다.
+ * @param {File} file 분석할 파일
+ * @param {number} gen 요청 시점 loadGeneration
+ * @returns {Promise<void>}
+ */
+function postProbeUploadWithProgress(file, gen) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const form = new FormData();
+    form.append('video', file);
+    let buf = '';
+    let parsedThrough = 0;
+    let gotProbe = false;
+
+    xhr.open('POST', '/api/probe/file');
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (gen !== state.loadGeneration) return;
+      showAnalysisUploadProgress(
+        file.name,
+        e.loaded,
+        e.lengthComputable ? e.total : file.size,
+        e.lengthComputable,
+      );
+    });
+
+    xhr.upload.addEventListener('load', () => {
+      if (gen !== state.loadGeneration) return;
+      hideAnalysisUploadProgress();
+      setStatus('서버 분석 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
+      if (gen === state.loadGeneration) setIntegrityLoading();
+    });
+
+    const drainResponse = () => {
+      if (gen !== state.loadGeneration) return;
+      const chunk = xhr.responseText.slice(parsedThrough);
+      if (!chunk) return;
+      parsedThrough = xhr.responseText.length;
+      buf += chunk;
+      try {
+        const parsed = feedAnalysisNdjson(buf, gen);
+        buf = parsed.buf;
+        if (parsed.gotProbe) gotProbe = true;
+      } catch (e) {
+        reject(e);
+      }
+    };
+
+    xhr.addEventListener('readystatechange', () => {
+      if (xhr.readyState >= 3) drainResponse();
+    });
+
+    xhr.addEventListener('load', () => {
+      if (gen !== state.loadGeneration) {
+        resolve();
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(readXhrErrorMessage(xhr)));
+        return;
+      }
+      drainResponse();
+      const tail = buf.trim();
+      if (tail) {
+        try {
+          const msg = parseAnalysisLine(tail);
+          if (msg.stage === 'probe') gotProbe = true;
+          handleAnalysisMessage(msg);
+        } catch (e) {
+          reject(e);
+          return;
+        }
+      }
+      if (!gotProbe) {
+        reject(new Error('서버가 분석 결과를 반환하지 않았습니다.'));
+        return;
+      }
+      resolve();
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('서버 연결에 실패했습니다.'));
+    });
+
+    xhr.addEventListener('abort', () => {
+      reject(new Error('업로드가 취소되었습니다.'));
+    });
+
+    xhr.send(form);
+  });
+}
+
+/**
+ * NDJSON 텍스트 버퍼에서 완결된 줄을 파싱해 핸들러로 넘긴다.
+ * @param {string} buf 누적 버퍼
+ * @param {number} gen loadGeneration
+ * @returns {{buf:string, gotProbe:boolean}} 남은 버퍼와 probe 수신 여부
+ */
+function feedAnalysisNdjson(buf, gen) {
+  let gotProbe = false;
+  let nl;
+  while ((nl = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line || gen !== state.loadGeneration) continue;
+    const msg = parseAnalysisLine(line);
+    if (msg.stage === 'probe') gotProbe = true;
+    handleAnalysisMessage(msg);
+  }
+  return { buf, gotProbe };
+}
+
+/**
+ * NDJSON 한 줄을 파싱한다.
+ * @param {string} line JSON 한 줄
+ * @returns {object} 파싱된 메시지
+ * @throws {Error} JSON 파싱 실패 시
+ */
+function parseAnalysisLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch (e) {
+    throw new Error('분석 스트림 파싱 실패: ' + (e.message || e));
+  }
+}
+
+/**
+ * XMLHttpRequest 오류 응답에서 사용자용 메시지를 추출한다.
+ * @param {XMLHttpRequest} xhr 완료된 XHR
+ * @returns {string} 표시할 메시지
+ */
+function readXhrErrorMessage(xhr) {
+  let data = {};
+  try {
+    data = JSON.parse(xhr.responseText || '{}');
+  } catch (_) { /* ignore */ }
+  const detail = data.detail || data.error;
+  if (xhr.status === 413) {
+    return detail || '업로드 파일이 서버 크기 한도를 초과했습니다.';
+  }
+  if (detail) return String(detail);
+  return `분석 실패 (HTTP ${xhr.status})`;
 }
 
 /**

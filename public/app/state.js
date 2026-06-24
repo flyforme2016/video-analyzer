@@ -38,7 +38,8 @@ export function cacheDom() {
   const ids = ['dropzone', 'fileInput', 'urlField', 'urlInput', 'urlBtn', 'urlHistoryDropdown',
     'urlHistoryList', 'urlHistoryEmpty', 'libraryUploadInput', 'libraryUploadBtn', 'libraryStatus',
     'libraryStatusText', 'libraryProgress', 'libraryProgressBar', 'libraryProgressLabel',
-    'serverFileList', 'serverFileEmpty', 'status', 'player', 'imagePlayer',
+    'serverFileList', 'serverFileEmpty', 'status', 'statusText', 'statusProgress',
+    'statusProgressBar', 'statusProgressLabel', 'player', 'imagePlayer',
     'playerStage', 'playerTitle', 'playerKindBadge', 'playerNotice',
     'sourceLabel', 'quickMeta', 'boxTree', 'treeEmpty', 'detailTitle', 'fieldList',
     'hexDump', 'probeSummary', 'probeJson', 'probeElapsed', 'copyProbe',
@@ -56,7 +57,11 @@ export function cacheDom() {
  */
 export function setStatus(msg, kind) {
   dom.status.hidden = false;
-  dom.status.textContent = msg;
+  if (dom.statusProgress) dom.statusProgress.hidden = true;
+  if (dom.statusProgressBar) dom.statusProgressBar.style.width = '0%';
+  if (dom.statusProgressLabel) dom.statusProgressLabel.textContent = '';
+  if (dom.statusText) dom.statusText.textContent = msg;
+  else dom.status.textContent = msg;
   dom.status.className = 'status' + (kind ? ' ' + kind : '');
 }
 
@@ -65,6 +70,8 @@ export function setStatus(msg, kind) {
  * @returns {void}
  */
 export function finishStatus() {
+  if (dom.statusProgress) dom.statusProgress.hidden = true;
+  if (dom.statusProgressLabel) dom.statusProgressLabel.textContent = '';
   setStatus('분석 완료', 'ok');
   setTimeout(() => { dom.status.hidden = true; }, 1500);
 }
