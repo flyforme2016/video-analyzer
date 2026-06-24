@@ -6,6 +6,24 @@
 import { state, dom, pickStream } from './state.js';
 
 /**
+ * 파일 선두 바이트로 재생기 종류를 추정한다(확장자와 실제 컨테이너 불일치 보정).
+ * @param {File} file 사용자가 선택한 파일
+ * @returns {Promise<'image'|'flv'|'hls'|'ts'|'video'|null>} 추정 종류
+ */
+export async function sniffPlaybackKind(file) {
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  if (head.length >= 3 && head[0] === 0x46 && head[1] === 0x4c && head[2] === 0x56) return 'flv';
+  if (head.length >= 6 && head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return 'image';
+  if (head.length >= 4 && head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return 'video';
+  if (head.length >= 8) {
+    const tag = String.fromCharCode(head[4], head[5], head[6], head[7]);
+    if (tag === 'ftyp' || tag === 'moov' || tag === 'mdat' || tag === 'styp' || tag === 'free') return 'video';
+  }
+  if (head.length >= 1 && head[0] === 0x47) return 'ts';
+  return detectPlaybackKindFromFile(file);
+}
+
+/**
  * 로컬 파일 메타데이터로 GIF(이미지) 재생 여부를 추정한다.
  * @param {File} file 사용자가 선택한 파일
  * @returns {'image'|'video'|null} 확실하면 종류, 아니면 null
@@ -22,20 +40,27 @@ export function detectPlaybackKindFromFile(file) {
 }
 
 /**
- * URL 경로 확장자로 GIF(이미지) 재생 여부를 추정한다.
- * @param {string} url 원격 미디어 URL
- * @returns {'image'|'video'|null} 확실하면 종류, 아니면 null
+ * URL 경로 확장자로 재생기 종류를 추정한다. 파일명만 넘어와도 동작한다.
+ * @param {string} url 원격 미디어 URL 또는 파일명
+ * @returns {'image'|'flv'|'hls'|'ts'|'video'|null} 확실하면 종류, 아니면 null
  */
 export function detectPlaybackKindFromUrl(url) {
-  try {
-    const path = new URL(url).pathname;
-    if (/\.gif$/i.test(path)) return 'image';
-    if (/\.(flv|f4v)$/i.test(path)) return 'flv';
-    if (/\.m3u8$/i.test(path)) return 'hls';
-    if (/\.(ts|m2ts|mts)$/i.test(path)) return 'ts';
-    if (/\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(path)) return 'video';
-  } catch (_) { /* ignore */ }
+  const path = pathnameFromUrlOrName(url);
+  if (/\.gif$/i.test(path)) return 'image';
+  if (/\.(flv|f4v)$/i.test(path)) return 'flv';
+  if (/\.m3u8$/i.test(path)) return 'hls';
+  if (/\.(ts|m2ts|mts)$/i.test(path)) return 'ts';
+  if (/\.(mp4|mov|m4v|webm|mkv|avi|3gp)$/i.test(path)) return 'video';
   return null;
+}
+
+/**
+ * 파일명만으로 재생기 종류를 추정한다(서버 라이브러리 메타용).
+ * @param {string} filename 파일명
+ * @returns {'image'|'flv'|'hls'|'ts'|'video'|null} 확실하면 종류, 아니면 null
+ */
+export function detectPlaybackKindFromFilename(filename) {
+  return detectPlaybackKindFromFile({ name: filename, type: '' });
 }
 
 /**
@@ -213,16 +238,47 @@ function attachFlvPlayer(src) {
     setPlayerNotice('이 브라우저는 FLV 재생(MSE)을 지원하지 않습니다. 분석 결과만 확인하세요.');
     return;
   }
+  resetVideoForMse();
   try {
-    const player = window.flvjs.createPlayer({ type: 'flv', url: src });
+    const player = window.flvjs.createPlayer(
+      { type: 'flv', url: src, isLive: false },
+      { enableWorker: false },
+    );
     player.on(window.flvjs.Events.ERROR, (type, detail) => {
       setPlayerNotice(`FLV 재생 오류: ${type} / ${detail}`);
+    });
+    player.on(window.flvjs.Events.MEDIA_INFO, () => {
+      dom.player.play().catch(() => { /* 자동재생 차단 시 사용자 조작 */ });
     });
     player.attachMediaElement(dom.player);
     player.load();
     state.msePlayer = player;
   } catch (e) {
     setPlayerNotice('FLV 재생 초기화 실패: ' + (e.message || e));
+  }
+}
+
+/**
+ * MSE 플레이어 부착 전 <video> 요소의 네이티브 소스·오류 상태를 초기화한다.
+ * @returns {void}
+ */
+function resetVideoForMse() {
+  dom.player.pause();
+  dom.player.removeAttribute('src');
+  dom.player.load();
+}
+
+/**
+ * URL 또는 파일명에서 경로 부분만 추출한다.
+ * @param {string} url URL 또는 파일명
+ * @returns {string} 비교용 경로 문자열
+ */
+function pathnameFromUrlOrName(url) {
+  const s = String(url || '');
+  try {
+    return new URL(s).pathname;
+  } catch (_) {
+    return '/' + s.replace(/^\/+/, '');
   }
 }
 

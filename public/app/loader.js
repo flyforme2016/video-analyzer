@@ -5,8 +5,8 @@
 
 import { state, dom, MAX_PARSE_BYTES, fmtBytes, setStatus, finishStatus } from './state.js';
 import {
-  detectPlaybackKindFromFile, detectPlaybackKindFromUrl, setPlayerSrc,
-  destroyMsePlayer, setPlayerNotice, updatePlayerChrome, makeObjectUrl,
+  sniffPlaybackKind, detectPlaybackKindFromUrl, detectPlaybackKindFromFilename,
+  setPlayerSrc, destroyMsePlayer, setPlayerNotice, updatePlayerChrome, makeObjectUrl,
 } from './playback.js';
 import { handleBuffer } from './container.js';
 import { probeViaUpload, probeViaUrl, probeViaLibrary } from './analysis.js';
@@ -21,7 +21,7 @@ export async function loadLocalFile(file) {
   resetForNewSource(`${file.name} · ${fmtBytes(file.size)}`);
   state.sourceIsLocal = true;
   state.sourceUrl = null;
-  const kindHint = detectPlaybackKindFromFile(file) || 'video';
+  const kindHint = await sniffPlaybackKind(file) || 'video';
   setPlayerSrc(makeObjectUrl(file), kindHint);
   setStatus('파일 분석·무결성 검사 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
   beginTabProgress();
@@ -73,7 +73,7 @@ export async function loadServerFile(file) {
   state.sourceUrl = null;
   state.serverFileId = file.id;
   const streamUrl = `/api/library/${encodeURIComponent(file.id)}/file`;
-  const kindHint = detectPlaybackKindFromUrl(file.name) || 'video';
+  const kindHint = detectPlaybackKindFromFilename(file.name) || 'video';
   setPlayerSrc(streamUrl, kindHint);
   setStatus('서버 파일 분석·무결성 검사 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
   beginTabProgress();

@@ -4,7 +4,7 @@
  */
 
 import { state, dom, escapeHtml, fmtBytes, pickStream, setStatus } from './state.js';
-import { reconcilePlaybackKind, detectPlaybackKindFromProbe } from './playback.js';
+import { reconcilePlaybackKind, detectPlaybackKindFromProbe, setPlayerNotice, destroyMsePlayer } from './playback.js';
 import { completeTabProgress, completeTabProgressMany } from './tab-progress.js';
 
 /**
@@ -118,6 +118,7 @@ function renderProbeResult(probe, probeError) {
   state.probe = probe;
   if (probe) {
     reconcilePlaybackKind(detectPlaybackKindFromProbe(probe));
+    warnUnsupportedFlvCodec(probe);
     dom.probeJson.textContent = JSON.stringify(probe, null, 2);
     renderProbeSummary(probe);
     renderQuickMeta(probe);
@@ -125,6 +126,24 @@ function renderProbeResult(probe, probeError) {
   } else {
     renderProbeError(probeError);
   }
+}
+
+/** flv.js(MSE)로 재생 가능한 FLV 비디오 코덱 */
+const FLV_MSE_VIDEO_CODECS = new Set(['h264', 'hevc', 'avc']);
+
+/**
+ * flv.js가 지원하지 않는 FLV 비디오 코덱이면 재생 불가 안내를 표시한다.
+ * @param {object} probe ffprobe JSON 결과
+ * @returns {void}
+ */
+function warnUnsupportedFlvCodec(probe) {
+  if (state.playbackKind !== 'flv') return;
+  const v = pickStream(probe, 'video');
+  if (!v || FLV_MSE_VIDEO_CODECS.has(v.codec_name)) return;
+  destroyMsePlayer();
+  setPlayerNotice(
+    `FLV 비디오 코덱 "${v.codec_name}"은(는) 브라우저 MSE 재생을 지원하지 않습니다 (H.264 필요). 분석 결과만 확인하세요.`
+  );
 }
 
 /**
