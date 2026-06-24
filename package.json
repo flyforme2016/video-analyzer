@@ -1,11 +1,28 @@
 {
   "name": "video-analyzer",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "비디오 컨테이너(바이트/박스) 시각화 + ffprobe 기반 트랜스코딩 검증 분석기",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "video",
+    "ffprobe",
+    "mp4",
+    "iso-bmff",
+    "hex",
+    "transcoding"
+  ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.1"
+  }
 }

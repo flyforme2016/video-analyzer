@@ -131,7 +131,7 @@ function printPortConflictHelp(port, explicit) {
 
 /**
  * 사용할 ffprobe 실행 파일 경로를 결정한다.
- * 환경변수(FFPROBE_PATH) → 루트 번들(ffprobe_v1) → 시스템 경로 → PATH의 'ffprobe' 순으로 탐색한다.
+ * 환경변수(FFPROBE_PATH) → 시스템 경로 → PATH의 'ffprobe' 순으로 탐색한다.
  * @returns {string} ffprobe 실행 파일 경로 또는 명령어 이름
  */
 function resolveFfprobe() {
@@ -148,8 +148,7 @@ function resolveFfmpeg() {
 
 /**
  * ffprobe/ffmpeg 실행 파일 경로를 후보 목록에서 찾는다.
- * 환경변수 → 저장소 루트 번들 바이너리(<tool>_v1) → 시스템 경로 → PATH 순으로 탐색한다.
- * 개발·배포 모두 루트 번들 바이너리를 사용하며, 필요 시 FFMPEG_PATH/FFPROBE_PATH로 덮어쓸 수 있다.
+ * 환경변수 → 시스템 경로 → PATH 순으로 탐색한다. 필요 시 FFMPEG_PATH/FFPROBE_PATH로 덮어쓸 수 있다.
  * @param {string} envKey 환경변수 키
  * @param {string} fallback 기본 명령어 이름
  * @returns {string} 실행 파일 경로
@@ -158,8 +157,6 @@ function resolveTool(envKey, fallback) {
   const base = process.env[envKey];
   const candidates = [
     base,
-    path.join(__dirname, `${fallback}_v1`),
-    path.join(__dirname, 'vendor', fallback),
     `/usr/local/bin/${fallback}`,
     `/usr/bin/${fallback}`,
     `/root/bin/${fallback}`,
