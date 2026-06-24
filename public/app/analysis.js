@@ -7,6 +7,7 @@ import { state, dom, escapeHtml, fmtBytes, pickStream, setStatus } from './state
 import { reconcilePlaybackKind, detectPlaybackKindFromProbe, setPlayerNotice, destroyMsePlayer } from './playback.js';
 import { completeTabProgress, completeTabProgressMany } from './tab-progress.js';
 import { showAnalysisUploadProgress, hideAnalysisUploadProgress } from './analysis-upload-progress.js';
+import { showIntegrityProgress, hideIntegrityProgress } from './analysis-integrity-progress.js';
 
 /**
  * 파일을 서버로 업로드하여 ffprobe 분석을 요청하고 결과를 렌더한다.
@@ -65,11 +66,15 @@ async function consumeAnalysisStream(res, gen) {
   if (!res.body) {
     throw new Error('분석 응답 본문이 없습니다.');
   }
-  if (gen === state.loadGeneration) setIntegrityLoading();
+  if (gen === state.loadGeneration) {
+    setIntegrityLoading();
+    showIntegrityProgress('컨테이너 형식 판별 중…', 0, '시작…', 'format');
+  }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   let gotProbe = false;
+  let gotIntegrity = false;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -77,16 +82,23 @@ async function consumeAnalysisStream(res, gen) {
     const parsed = feedAnalysisNdjson(buf, gen);
     buf = parsed.buf;
     if (parsed.gotProbe) gotProbe = true;
+    if (parsed.gotIntegrity) gotIntegrity = true;
   }
   const tail = buf.trim();
   if (tail && gen === state.loadGeneration) {
-    const msg = parseAnalysisLine(tail);
-    if (msg.stage === 'probe') gotProbe = true;
-    handleAnalysisMessage(msg);
+    for (const line of tail.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const msg = parseAnalysisLine(trimmed);
+      if (msg.stage === 'probe') gotProbe = true;
+      if (msg.stage === 'integrity') gotIntegrity = true;
+      handleAnalysisMessage(msg);
+    }
   }
   if (!gotProbe) {
     throw new Error('서버가 분석 결과를 반환하지 않았습니다.');
   }
+  finalizeIntegrityStream(gotIntegrity, gen);
 }
 
 /**
@@ -103,6 +115,7 @@ function postProbeUploadWithProgress(file, gen) {
     let buf = '';
     let parsedThrough = 0;
     let gotProbe = false;
+    let gotIntegrity = false;
 
     xhr.open('POST', '/api/probe/file');
 
@@ -121,6 +134,7 @@ function postProbeUploadWithProgress(file, gen) {
       hideAnalysisUploadProgress();
       setStatus('서버 분석 중… (대용량은 수 분 걸릴 수 있음)', 'loading');
       if (gen === state.loadGeneration) setIntegrityLoading();
+      showIntegrityProgress('컨테이너 형식 판별 중…', 0, '시작…', 'format');
     });
 
     const drainResponse = () => {
@@ -133,6 +147,7 @@ function postProbeUploadWithProgress(file, gen) {
         const parsed = feedAnalysisNdjson(buf, gen);
         buf = parsed.buf;
         if (parsed.gotProbe) gotProbe = true;
+        if (parsed.gotIntegrity) gotIntegrity = true;
       } catch (e) {
         reject(e);
       }
@@ -155,9 +170,14 @@ function postProbeUploadWithProgress(file, gen) {
       const tail = buf.trim();
       if (tail) {
         try {
-          const msg = parseAnalysisLine(tail);
-          if (msg.stage === 'probe') gotProbe = true;
-          handleAnalysisMessage(msg);
+          for (const line of tail.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const msg = parseAnalysisLine(trimmed);
+            if (msg.stage === 'probe') gotProbe = true;
+            if (msg.stage === 'integrity') gotIntegrity = true;
+            handleAnalysisMessage(msg);
+          }
         } catch (e) {
           reject(e);
           return;
@@ -167,6 +187,7 @@ function postProbeUploadWithProgress(file, gen) {
         reject(new Error('서버가 분석 결과를 반환하지 않았습니다.'));
         return;
       }
+      finalizeIntegrityStream(gotIntegrity, gen);
       resolve();
     });
 
@@ -186,10 +207,11 @@ function postProbeUploadWithProgress(file, gen) {
  * NDJSON 텍스트 버퍼에서 완결된 줄을 파싱해 핸들러로 넘긴다.
  * @param {string} buf 누적 버퍼
  * @param {number} gen loadGeneration
- * @returns {{buf:string, gotProbe:boolean}} 남은 버퍼와 probe 수신 여부
+ * @returns {{buf:string, gotProbe:boolean, gotIntegrity:boolean}} 남은 버퍼와 단계 수신 여부
  */
 function feedAnalysisNdjson(buf, gen) {
   let gotProbe = false;
+  let gotIntegrity = false;
   let nl;
   while ((nl = buf.indexOf('\n')) >= 0) {
     const line = buf.slice(0, nl).trim();
@@ -197,9 +219,10 @@ function feedAnalysisNdjson(buf, gen) {
     if (!line || gen !== state.loadGeneration) continue;
     const msg = parseAnalysisLine(line);
     if (msg.stage === 'probe') gotProbe = true;
+    if (msg.stage === 'integrity') gotIntegrity = true;
     handleAnalysisMessage(msg);
   }
-  return { buf, gotProbe };
+  return { buf, gotProbe, gotIntegrity };
 }
 
 /**
@@ -236,7 +259,7 @@ function readXhrErrorMessage(xhr) {
 
 /**
  * 스트림에서 받은 단계별 메시지를 해당 렌더러로 분배한다.
- * @param {{stage:string, ffprobe?:object, ffprobeError?:string, integrity?:object}} msg 스트림 메시지
+ * @param {{stage:string, ffprobe?:object, ffprobeError?:string, integrity?:object, phase?:string, phasePct?:number, label?:string, detail?:string}} msg 스트림 메시지
  * @returns {void}
  */
 function handleAnalysisMessage(msg) {
@@ -244,10 +267,39 @@ function handleAnalysisMessage(msg) {
     renderProbeResult(msg.ffprobe, msg.ffprobeError);
     completeTabProgressMany(['probe', 'checks']);
     setStatus('ffprobe 완료 · 미디어 무결성 검사 중…', 'loading');
+    showIntegrityProgress('컨테이너 형식 판별 중…', 0, '', 'format');
+  } else if (msg.stage === 'integrity-progress') {
+    showIntegrityProgress(
+      msg.label || '미디어 무결성 검사 중…',
+      msg.phasePct ?? -1,
+      msg.detail || '',
+      msg.phase || '',
+    );
   } else if (msg.stage === 'integrity') {
-    renderIntegrity(msg.integrity);
-    completeTabProgress('integrity');
+    hideIntegrityProgress();
+    try {
+      renderIntegrity(msg.integrity);
+    } finally {
+      completeTabProgress('integrity');
+    }
   }
+}
+
+/**
+ * 스트림 종료 시 무결성 결과가 없으면 탭 스피너를 정리하고 안내를 표시한다.
+ * @param {boolean} gotIntegrity integrity 단계 수신 여부
+ * @param {number} gen 요청 시점 loadGeneration
+ * @returns {void}
+ */
+function finalizeIntegrityStream(gotIntegrity, gen) {
+  if (gen !== state.loadGeneration || gotIntegrity) return;
+  hideIntegrityProgress();
+  completeTabProgress('integrity');
+  if (!dom.integrityScore) return;
+  dom.integrityScore.innerHTML =
+    '<div class="score-badge"><span class="muted">무결성 결과를 받지 못했습니다. 페이지를 새로고침 후 다시 시도해 주세요.</span></div>';
+  dom.integrityMeta.innerHTML = '';
+  dom.integrityList.innerHTML = '';
 }
 
 /**
