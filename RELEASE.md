@@ -2,6 +2,19 @@
 
 버전 번호는 [Semantic Versioning](https://semver.org/lang/ko/)을 따릅니다.
 
+## [1.0.2] - 2026-10-30
+
+### 추가
+- **점검 항목 상세 펼치기**: 미디어 무결성·트랜스코딩 점검 항목에 상세 데이터가 있으면 `상세 N건`이 표시되고, 클릭하면 샘플별 표(최대 100행)가 펼쳐짐
+  - mdat/파일 범위 초과·0바이트·오버랩 샘플: 샘플 번호, 오프셋, 크기, 실제 위치(예: `moof @1364 내부`)
+  - NAL 잘림·프레임 참조 이상·open GOP·기타 NAL 이슈: 샘플 번호, 파일 오프셋, 키프레임 여부, NAL 구성(예: `SEI(6) + Non-IDR slice(I)`), 내용
+- 샘플마다 따로 표시되던 `샘플 #N NAL` 경고 행을 해당 항목의 상세 표로 통합
+
+### 수정
+- **fragmented MP4 무결성 검사 오탐**: 첫 번째 mdat만 기준으로 검사해 `moof + mdat`가 반복되는 파일에서 대부분의 샘플이 `샘플 mdat 범위 초과`로 잡히던 문제 → 모든 mdat 범위 기준으로 검사
+- **open GOP 키프레임 오탐**: IDR 대신 recovery point SEI + I-slice로 랜덤 액세스 지점을 표시하는 키프레임(H.264 표준 허용)이 `프레임 참조 이상` 오류로 잡히던 문제 → `open GOP 키프레임` 정보 항목으로 집계
+- 샘플 인덱스를 ffprobe로 추출한 경우에도 샘플 수가 `(stsz/stco 기준)`으로 표시되던 문구 제거
+
 ## [1.0.1] - 2026-10-30
 
 ### 추가
@@ -37,5 +50,6 @@
 - **진행률 표시**: 업로드, 탭 로딩, 파일 분석, 무결성 검사 진행률
 - **보안·운영**: URL 불러오기 SSRF 방어, ffprobe/무결성 검사 로깅 및 로그 로테이션
 
+[1.0.2]: https://github.com/flyforme2016/video-analyzer/compare/1.0.1...1.0.2
 [1.0.1]: https://github.com/flyforme2016/video-analyzer/compare/1.0.0...1.0.1
 [1.0.0]: https://github.com/flyforme2016/video-analyzer/releases/tag/1.0.0
