@@ -434,10 +434,27 @@ function renderIntegrity(report) {
   dom.integrityMeta.innerHTML = meta.map(([k, v]) =>
     `<div class="kv"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div></div>`).join('');
 
-  dom.integrityList.innerHTML = (report.checks || []).map((c) =>
-    `<li class="check ${c.level}"><span class="ico">${iconFor(c.level)}</span>` +
-    `<div><div class="ctitle">${escapeHtml(c.title)}</div>` +
-    `<div class="cdesc">${c.desc}</div></div></li>`).join('');
+  dom.integrityList.innerHTML = (report.checks || []).map(renderCheckItem).join('');
+}
+
+/**
+ * 점검 항목 1개를 렌더한다. details가 있으면 클릭해서 펼치는 상세 표를 함께 그린다.
+ * @param {{level:string, title:string, desc:string, details?:{columns:Array<string>, rows:Array<Array>, total:number}}} c 점검 항목
+ * @returns {string} li HTML
+ */
+function renderCheckItem(c) {
+  const head = `<div class="ctitle">${escapeHtml(c.title)}</div><div class="cdesc">${c.desc}</div>`;
+  if (!c.details || !c.details.rows || !c.details.rows.length) {
+    return `<li class="check ${c.level}"><span class="ico">${iconFor(c.level)}</span><div>${head}</div></li>`;
+  }
+  const d = c.details;
+  const more = d.total > d.rows.length ? `<div class="cdetails-more">… 외 ${d.total - d.rows.length}건 (최대 ${d.rows.length}건 표시)</div>` : '';
+  const table =
+    `<table class="cdetails-table"><thead><tr>${d.columns.map((col) => `<th>${escapeHtml(col)}</th>`).join('')}</tr></thead>` +
+    `<tbody>${d.rows.map((row) => `<tr>${row.map((v) => `<td>${escapeHtml(String(v))}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return `<li class="check ${c.level} has-details"><span class="ico">${iconFor(c.level)}</span>` +
+    `<details><summary>${head}<span class="cdetails-hint">상세 ${d.total}건</span></summary>` +
+    `<div class="cdetails">${table}${more}</div></details></li>`;
 }
 
 /**
@@ -501,10 +518,7 @@ function renderChecks(probe, boxes) {
     `<div class="score-badge"><span class="ico">${iconFor(tone)}</span>` +
     `<span class="num">${verdict}</span>` +
     `<span class="muted">오류 ${errors} · 경고 ${warns} · 항목 ${checks.length}</span></div>`;
-  dom.checksList.innerHTML = checks.map((c) =>
-    `<li class="check ${c.level}"><span class="ico">${iconFor(c.level)}</span>` +
-    `<div><div class="ctitle">${escapeHtml(c.title)}</div>` +
-    `<div class="cdesc">${c.desc}</div></div></li>`).join('');
+  dom.checksList.innerHTML = checks.map(renderCheckItem).join('');
 }
 
 /**
