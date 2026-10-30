@@ -153,7 +153,75 @@
   function parseSampleDescription(view, box, depth, ctx) {
     box.fullbox = readFullBoxHeader(view, box.dataStart);
     const entryStart = box.dataStart + 8; // version/flags(4) + entry_count(4)
-    return parseBoxes(view, entryStart, box.dataEnd, depth + 1, ctx);
+    const entries = parseBoxes(view, entryStart, box.dataEnd, depth + 1, ctx);
+    entries.forEach((entry) => parseSampleEntryChildren(view, entry, depth + 1, ctx));
+    return entries;
+  }
+
+  // 샘플 엔트리 고정 필드 뒤에 자식 박스(esds/avcC/btrt 등)가 오는 코덱 타입
+  const AUDIO_SAMPLE_ENTRIES = new Set([
+    'mp4a', 'enca', 'ac-3', 'ec-3', 'ac-4', 'Opus', 'fLaC', 'alac', 'samr', 'sawb',
+    'mha1', 'mhm1', 'dtsc', 'dtsh', 'dtsl', 'dtse', 'ipcm', 'fpcm', 'lpcm', 'sowt', 'twos',
+  ]);
+  const VISUAL_SAMPLE_ENTRIES = new Set([
+    'avc1', 'avc2', 'avc3', 'avc4', 'hvc1', 'hev1', 'vvc1', 'vvi1', 'av01', 'vp08', 'vp09',
+    'mp4v', 'encv', 'dvh1', 'dvhe', 'dva1', 'dvav', 'mjp2', 'jpeg', 's263',
+  ]);
+
+  /**
+   * 샘플 엔트리의 고정 필드(SampleEntry + Audio/VisualSampleEntry)를 건너뛰고 자식 박스를 파싱한다.
+   * @param {DataView} view 파일 DataView
+   * @param {object} entry 샘플 엔트리 박스 노드
+   * @param {number} depth 샘플 엔트리 깊이
+   * @param {{fileSize:number}} ctx 파싱 컨텍스트
+   * @returns {void}
+   */
+  function parseSampleEntryChildren(view, entry, depth, ctx) {
+    const p = entry.dataStart;
+    let fixedSize = 0;
+    if (AUDIO_SAMPLE_ENTRIES.has(entry.type)) {
+      // reserved(6) + data_reference_index(2) + version(2) ... → 기본 28바이트
+      // QuickTime 사운드 디스크립션 v1은 +16, v2는 +36
+      if (p + 10 > entry.dataEnd) return;
+      const qtVersion = view.getUint16(p + 8);
+      fixedSize = 28 + (qtVersion === 1 ? 16 : qtVersion === 2 ? 36 : 0);
+    } else if (VISUAL_SAMPLE_ENTRIES.has(entry.type)) {
+      fixedSize = 78;
+    } else {
+      return;
+    }
+    const childStart = p + fixedSize;
+    if (childStart + 8 > entry.dataEnd) return;
+
+    entry.children = parseBoxes(view, childStart, entry.dataEnd, depth + 1, ctx);
+    entry.hasChildren = entry.children.length > 0;
+    if (!entry.hasChildren) return;
+
+    entry.fields = headerFields(view, entry);
+    entry.fields.push(field(p, 6, 'reserved', '', view));
+    entry.fields.push(field(p + 6, 2, 'data_reference_index', String(view.getUint16(p + 6)), view));
+    if (AUDIO_SAMPLE_ENTRIES.has(entry.type)) {
+      entry.fields.push(field(p + 8, 8, 'version/reserved', String(view.getUint16(p + 8)), view));
+      entry.fields.push(field(p + 16, 2, 'channelcount', String(view.getUint16(p + 16)), view));
+      entry.fields.push(field(p + 18, 2, 'samplesize', `${view.getUint16(p + 18)} bit`, view));
+      entry.fields.push(field(p + 20, 4, 'pre_defined/reserved', '', view));
+      entry.fields.push(field(p + 24, 4, 'samplerate', `${view.getUint16(p + 24)} Hz`, view));
+      if (fixedSize > 28) entry.fields.push(field(p + 28, fixedSize - 28, 'qt_sound_desc_ext', `(QuickTime v${view.getUint16(p + 8)} 확장)`, view));
+    } else {
+      entry.fields.push(field(p + 8, 16, 'pre_defined/reserved', '', view));
+      entry.fields.push(field(p + 24, 2, 'width', String(view.getUint16(p + 24)), view));
+      entry.fields.push(field(p + 26, 2, 'height', String(view.getUint16(p + 26)), view));
+      entry.fields.push(field(p + 28, 4, 'horizresolution', `${view.getUint32(p + 28) / 65536} dpi`, view));
+      entry.fields.push(field(p + 32, 4, 'vertresolution', `${view.getUint32(p + 32) / 65536} dpi`, view));
+      entry.fields.push(field(p + 36, 4, 'reserved', '', view));
+      entry.fields.push(field(p + 40, 2, 'frame_count', String(view.getUint16(p + 40)), view));
+      const nameLen = Math.min(view.getUint8(p + 42), 31);
+      let name = '';
+      for (let i = 0; i < nameLen; i += 1) name += String.fromCharCode(view.getUint8(p + 43 + i));
+      entry.fields.push(field(p + 42, 32, 'compressorname', name ? `"${name}"` : '(없음)', view));
+      entry.fields.push(field(p + 74, 2, 'depth', `0x${view.getUint16(p + 74).toString(16)}`, view));
+      entry.fields.push(field(p + 76, 2, 'pre_defined', '', view));
+    }
   }
 
   // ------- 필드 디코더 레지스트리 -------
