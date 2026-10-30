@@ -258,7 +258,7 @@
   const FULLBOX_TYPES = new Set([
     'mvhd', 'tkhd', 'mdhd', 'hdlr', 'vmhd', 'smhd', 'hmhd', 'nmhd', 'dref', 'url ',
     'elst', 'stts', 'ctts', 'stsc', 'stsz', 'stz2', 'stco', 'co64', 'stss', 'sdtp',
-    'mehd', 'trex', 'mfhd', 'tfhd', 'tfdt', 'trun', 'sidx',
+    'mehd', 'trex', 'mfhd', 'tfhd', 'tfdt', 'trun', 'sidx', 'esds',
   ]);
 
   const FIELD_DECODERS = {
@@ -285,6 +285,7 @@
     tfdt: decodeTfdt,
     trun: decodeTrun,
     sidx: decodeSidx,
+    esds: decodeEsds,
   };
 
   /**
@@ -627,6 +628,231 @@
     let p = ctx.pos;
     out.push(field(p, 4, 'reference_ID', String(view.getUint32(p)), view)); p += 4;
     out.push(field(p, 4, 'timescale', String(view.getUint32(p)), view));
+  }
+
+  // ------- esds(MPEG-4 ES 디스크립터, ISO/IEC 14496-1) -------
+
+  const OBJECT_TYPE_NAMES = {
+    0x20: 'MPEG-4 Visual', 0x21: 'H.264/AVC', 0x23: 'H.265/HEVC', 0x40: 'MPEG-4 Audio',
+    0x60: 'MPEG-2 Visual(Simple)', 0x61: 'MPEG-2 Visual(Main)', 0x66: 'MPEG-2 AAC Main',
+    0x67: 'MPEG-2 AAC LC', 0x68: 'MPEG-2 AAC SSR', 0x69: 'MPEG-2 Audio(MP3)', 0x6A: 'MPEG-1 Visual',
+    0x6B: 'MPEG-1 Audio(MP3)', 0x6C: 'JPEG', 0xA5: 'AC-3', 0xA6: 'E-AC-3', 0xA9: 'DTS',
+    0xAD: 'Opus', 0xDD: 'Vorbis',
+  };
+  const STREAM_TYPE_NAMES = {
+    1: 'ObjectDescriptor', 2: 'ClockReference', 3: 'SceneDescription', 4: 'Visual', 5: 'Audio',
+    6: 'MPEG-7', 7: 'IPMP', 8: 'OCI', 9: 'MPEG-J', 10: 'Interaction', 11: 'IPMPTool',
+  };
+  const AUDIO_OBJECT_TYPE_NAMES = {
+    1: 'AAC Main', 2: 'AAC LC', 3: 'AAC SSR', 4: 'AAC LTP', 5: 'SBR(HE-AAC)', 6: 'AAC Scalable',
+    7: 'TwinVQ', 8: 'CELP', 9: 'HVXC', 17: 'ER AAC LC', 19: 'ER AAC LTP', 20: 'ER AAC Scalable',
+    22: 'ER BSAC', 23: 'ER AAC LD', 29: 'PS(HE-AACv2)', 32: 'MPEG Layer-1', 33: 'MPEG Layer-2',
+    34: 'MPEG Layer-3', 36: 'ALS', 39: 'ER AAC ELD', 42: 'USAC(xHE-AAC)',
+  };
+  const AAC_SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+  const CHANNEL_CONFIG_NAMES = ['AOT 지정', 'mono', 'stereo', '3ch', '4ch', '5ch', '5.1ch', '7.1ch'];
+  const DESCRIPTOR_TAG_NAMES = {
+    0x03: 'ES_Descriptor', 0x04: 'DecoderConfigDescriptor', 0x05: 'DecoderSpecificInfo',
+    0x06: 'SLConfigDescriptor', 0x14: 'ProfileLevelIndicationIndexDescriptor',
+  };
+
+  /**
+   * esds: ES_Descriptor 트리(DecoderConfig / AudioSpecificConfig / SLConfig)를 사람이 읽을 수 있게 디코드한다.
+   * @param {DataView} view DataView
+   * @param {object} box 박스
+   * @param {Array<object>} out 필드 배열
+   * @param {{pos:number}} ctx 컨텍스트
+   * @returns {void}
+   */
+  function decodeEsds(view, box, out, ctx) {
+    const info = {};
+    const details = [];
+    try {
+      decodeDescriptor(view, ctx.pos, box.dataEnd, details, info, '');
+    } catch (e) {
+      details.push(field(ctx.pos, box.dataEnd - ctx.pos, 'error', `디스크립터 파싱 실패: ${e.message}`, view));
+    }
+    out.push(field(ctx.pos, box.dataEnd - ctx.pos, 'summary', esdsSummary(info), view));
+    details.forEach((f) => out.push(f));
+  }
+
+  /**
+   * 디스크립터 1개(tag + 가변 길이 size + 본문)를 디코드하고 다음 오프셋을 반환한다.
+   * @param {DataView} view DataView
+   * @param {number} p 디스크립터 시작 오프셋
+   * @param {number} limit 부모 종료 오프셋
+   * @param {Array<object>} out 필드 배열
+   * @param {object} info 요약용 수집 객체
+   * @param {string} prefix 부모 디스크립터 접두사
+   * @returns {number} 다음 디스크립터 오프셋
+   */
+  function decodeDescriptor(view, p, limit, out, info, prefix) {
+    const start = p;
+    const tag = view.getUint8(p); p += 1;
+    let size = 0;
+    for (let i = 0; i < 4 && p < limit; i += 1) {
+      const b = view.getUint8(p); p += 1;
+      size = (size << 7) | (b & 0x7f);
+      if (!(b & 0x80)) break;
+    }
+    const bodyEnd = Math.min(p + size, limit);
+    const tagName = DESCRIPTOR_TAG_NAMES[tag] || `Descriptor(0x${tag.toString(16)})`;
+    const name = { 0x03: 'ES', 0x04: 'DecoderConfig', 0x05: 'DecSpecificInfo', 0x06: 'SLConfig' }[tag] || tagName;
+    out.push(field(start, p - start, `${prefix}${name}`, `tag=0x${tag.toString(16).padStart(2, '0')} ${tagName}, size=${size}`, view));
+    const pre = `${prefix}${name}.`;
+
+    if (tag === 0x03) {
+      out.push(field(p, 2, pre + 'ES_ID', String(view.getUint16(p)), view)); p += 2;
+      const flags = view.getUint8(p);
+      const sdf = flags >> 7;
+      const urlFlag = (flags >> 6) & 1;
+      const ocrFlag = (flags >> 5) & 1;
+      out.push(field(p, 1, pre + 'flags', `streamDependenceFlag=${sdf}, URL_Flag=${urlFlag}, OCRstreamFlag=${ocrFlag}, streamPriority=${flags & 0x1f}`, view)); p += 1;
+      if (sdf) { out.push(field(p, 2, pre + 'dependsOn_ES_ID', String(view.getUint16(p)), view)); p += 2; }
+      if (urlFlag) {
+        const len = view.getUint8(p);
+        let url = '';
+        for (let i = 0; i < len; i += 1) url += String.fromCharCode(view.getUint8(p + 1 + i));
+        out.push(field(p, 1 + len, pre + 'URLstring', `"${url}"`, view)); p += 1 + len;
+      }
+      if (ocrFlag) { out.push(field(p, 2, pre + 'OCR_ES_Id', String(view.getUint16(p)), view)); p += 2; }
+    } else if (tag === 0x04) {
+      const oti = view.getUint8(p);
+      info.oti = oti;
+      out.push(field(p, 1, pre + 'objectTypeIndication', `0x${oti.toString(16).padStart(2, '0')} (${OBJECT_TYPE_NAMES[oti] || '알 수 없음'})`, view)); p += 1;
+      const st = view.getUint8(p);
+      info.streamType = st >> 2;
+      out.push(field(p, 1, pre + 'streamType', `${st >> 2} (${STREAM_TYPE_NAMES[st >> 2] || '예약'}), upStream=${(st >> 1) & 1}`, view)); p += 1;
+      const bufSize = (view.getUint8(p) << 16) | view.getUint16(p + 1);
+      out.push(field(p, 3, pre + 'bufferSizeDB', `${bufSize} bytes`, view)); p += 3;
+      info.maxBitrate = view.getUint32(p);
+      out.push(field(p, 4, pre + 'maxBitrate', fmtBitrate(info.maxBitrate), view)); p += 4;
+      info.avgBitrate = view.getUint32(p);
+      out.push(field(p, 4, pre + 'avgBitrate', fmtBitrate(info.avgBitrate), view)); p += 4;
+    } else if (tag === 0x05) {
+      if (info.oti === 0x40 || (info.oti >= 0x66 && info.oti <= 0x68)) {
+        decodeAudioSpecificConfig(view, p, bodyEnd, out, info, `${prefix}ASC.`);
+      } else {
+        out.push(field(p, bodyEnd - p, pre + 'data', `${bodyEnd - p} bytes`, view));
+      }
+      return bodyEnd;
+    } else if (tag === 0x06) {
+      const predefined = view.getUint8(p);
+      const label = { 0: 'custom', 1: 'null SL packet header', 2: 'MP4 파일용' }[predefined] || '예약';
+      out.push(field(p, 1, pre + 'predefined', `${predefined} (${label})`, view));
+      return bodyEnd;
+    } else {
+      if (bodyEnd > p) out.push(field(p, bodyEnd - p, pre + 'data', `${bodyEnd - p} bytes`, view));
+      return bodyEnd;
+    }
+
+    // ES / DecoderConfig: 남은 영역은 하위 디스크립터
+    while (p + 2 <= bodyEnd) p = decodeDescriptor(view, p, bodyEnd, out, info, pre);
+    return bodyEnd;
+  }
+
+  /**
+   * AudioSpecificConfig(ISO/IEC 14496-3)의 주요 비트 필드를 디코드한다.
+   * @param {DataView} view DataView
+   * @param {number} start 시작 오프셋
+   * @param {number} end 종료 오프셋
+   * @param {Array<object>} out 필드 배열
+   * @param {object} info 요약용 수집 객체
+   * @param {string} pre 필드 이름 접두사
+   * @returns {void}
+   */
+  function decodeAudioSpecificConfig(view, start, end, out, info, pre) {
+    let bit = 0;
+    const totalBits = (end - start) * 8;
+    const read = (n) => {
+      if (bit + n > totalBits) throw new Error('AudioSpecificConfig 길이 부족');
+      let v = 0;
+      for (let i = 0; i < n; i += 1, bit += 1) {
+        v = v * 2 + ((view.getUint8(start + (bit >> 3)) >> (7 - (bit & 7))) & 1);
+      }
+      return v;
+    };
+    const push = (fromBit, name, value) => {
+      const o = start + (fromBit >> 3);
+      out.push(field(o, Math.max(1, start + ((bit + 7) >> 3) - o), pre + name, value, view));
+    };
+    const readAot = () => {
+      const b = bit;
+      let aot = read(5);
+      if (aot === 31) aot = 32 + read(6);
+      return { aot, from: b };
+    };
+    const readFreq = () => {
+      const b = bit;
+      const idx = read(4);
+      const hz = idx === 0xf ? read(24) : AAC_SAMPLE_RATES[idx];
+      return { idx, hz, from: b };
+    };
+    const aotLabel = (a) => `${a} (${AUDIO_OBJECT_TYPE_NAMES[a] || '알 수 없음'})`;
+
+    const first = readAot();
+    info.aot = first.aot;
+    push(first.from, 'audioObjectType', aotLabel(first.aot));
+    const freq = readFreq();
+    info.sampleRate = freq.hz;
+    push(freq.from, 'samplingFrequencyIndex', freq.idx === 0xf ? `15 (명시값 ${freq.hz} Hz)` : `${freq.idx} (${freq.hz || '예약'} Hz)`);
+    const chFrom = bit;
+    const ch = read(4);
+    info.channels = ch;
+    push(chFrom, 'channelConfiguration', `${ch} (${CHANNEL_CONFIG_NAMES[ch] || '예약'})`);
+
+    let coreAot = first.aot;
+    if (first.aot === 5 || first.aot === 29) {
+      const ext = readFreq();
+      info.extSampleRate = ext.hz;
+      push(ext.from, 'extensionSamplingFrequencyIndex', ext.idx === 0xf ? `15 (명시값 ${ext.hz} Hz)` : `${ext.idx} (${ext.hz || '예약'} Hz)`);
+      const core = readAot();
+      coreAot = core.aot;
+      push(core.from, 'audioObjectType(core)', aotLabel(core.aot));
+    }
+
+    // GASpecificConfig(AAC 계열)
+    if ([1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22, 23].includes(coreAot)) {
+      const b = bit;
+      const frameLengthFlag = read(1);
+      const dependsOnCoreCoder = read(1);
+      const delay = dependsOnCoreCoder ? read(14) : null;
+      const extensionFlag = read(1);
+      push(b, 'GASpecificConfig',
+        `frameLengthFlag=${frameLengthFlag} (${frameLengthFlag ? 960 : 1024} samples/frame), dependsOnCoreCoder=${dependsOnCoreCoder}` +
+        (delay !== null ? `, coreCoderDelay=${delay}` : '') + `, extensionFlag=${extensionFlag}`);
+    }
+    // 바이트 정렬 패딩을 제외하고 남은 바이트(syncExtension 등)
+    const o = start + ((bit + 7) >> 3);
+    if (o < end) out.push(field(o, end - o, pre + 'remaining', `${end - o} bytes (확장 정보)`, view));
+  }
+
+  /**
+   * 수집된 esds 정보로 한 줄 요약(코덱 문자열 포함)을 만든다.
+   * @param {object} info decodeDescriptor가 채운 정보
+   * @returns {string} 요약 문자열
+   */
+  function esdsSummary(info) {
+    if (info.oti === undefined) return '(디코더 설정 없음)';
+    const parts = [];
+    const codec = `${info.streamType === 4 ? 'mp4v' : 'mp4a'}.${info.oti.toString(16)}` + (info.aot ? `.${info.aot}` : '');
+    if (info.aot) parts.push(`${AUDIO_OBJECT_TYPE_NAMES[info.aot] || 'AOT ' + info.aot} (${codec})`);
+    else parts.push(`${OBJECT_TYPE_NAMES[info.oti] || 'OTI 0x' + info.oti.toString(16)}`);
+    if (info.sampleRate) parts.push(`${info.sampleRate} Hz` + (info.extSampleRate ? ` → ${info.extSampleRate} Hz(SBR)` : ''));
+    if (info.channels !== undefined) parts.push(CHANNEL_CONFIG_NAMES[info.channels] || `${info.channels}ch`);
+    if (info.avgBitrate) parts.push(`avg ${fmtBitrate(info.avgBitrate)}`);
+    if (info.maxBitrate) parts.push(`max ${fmtBitrate(info.maxBitrate)}`);
+    return parts.join(' · ');
+  }
+
+  /**
+   * bps 값을 사람이 읽는 비트레이트 문자열로 변환한다.
+   * @param {number} bps 초당 비트
+   * @returns {string} 예: "128.0 kbps (128000 bps)"
+   */
+  function fmtBitrate(bps) {
+    if (!bps) return '0 (미지정)';
+    return bps >= 1000 ? `${(bps / 1000).toFixed(1)} kbps (${bps} bps)` : `${bps} bps`;
   }
 
   // ------- 공통 헬퍼 -------
