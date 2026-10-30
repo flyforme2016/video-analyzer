@@ -146,6 +146,7 @@
       box.children = parseBoxes(view, dataStart, dataEnd, depth + 1, ctx);
       box.hasChildren = box.children.length > 0;
       if (type === 'ilst') box.children.forEach((item) => parseIlstItem(view, item, depth + 1, ctx));
+      if (type === 'trak') box.label = trackLabel(view, box);
     }
 
     if (!box.hasChildren && !truncated) {
@@ -186,6 +187,21 @@
     if (box.type === 'stsd' || box.type === 'dref') {
       box.fields.push(field(p + 4, 4, 'entry_count', String(view.getUint32(p + 4)), view));
     }
+  }
+
+  /**
+   * trak 하위 mdia/hdlr의 handler_type으로 트랙 종류(비디오/오디오 등)를 라벨에 표시한다.
+   * @param {DataView} view 파일 DataView
+   * @param {object} trak trak 박스 노드
+   * @returns {string} 예: "트랙(비디오)"
+   */
+  function trackLabel(view, trak) {
+    const mdia = trak.children.find((c) => c.type === 'mdia');
+    const hdlr = mdia && mdia.children.find((c) => c.type === 'hdlr');
+    if (!hdlr || hdlr.dataStart + 12 > hdlr.dataEnd) return TYPE_LABELS.trak;
+    const handler = readType(view, hdlr.dataStart + 8); // version/flags(4) + pre_defined(4)
+    const kind = handlerLabel(handler).trim().replace(/[()]/g, '') || handler;
+    return `트랙(${kind})`;
   }
 
   /**
@@ -1776,7 +1792,7 @@
    * @returns {string} 라벨(괄호 포함) 또는 빈 문자열
    */
   function handlerLabel(handler) {
-    const map = { vide: ' (비디오)', soun: ' (오디오)', hint: ' (힌트)', meta: ' (메타)', subt: ' (자막)', text: ' (텍스트)' };
+    const map = { vide: ' (비디오)', soun: ' (오디오)', hint: ' (힌트)', meta: ' (메타)', subt: ' (자막)', text: ' (텍스트)', sbtl: ' (자막)', clcp: ' (캡션)', tmcd: ' (타임코드)' };
     return map[handler] || '';
   }
 
